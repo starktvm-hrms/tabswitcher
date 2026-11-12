@@ -41,9 +41,9 @@ src/
   presentStore.ts  playlist (localStorage) + uploaded files (IndexedDB)
   useFullscreen.ts element fullscreen hook
 deploy/            one-time VPS setup script + deploy docs
-.github/workflows/deploy.yml  build, test and deploy on push to main
+.github/workflows/  deploy.yml (build + publish on push to main), setup-server.yml (one-time VPS setup)
 ```
 
 ## Deployment
 
-Every push to `main` is built, tested and copied to the Hostinger VPS, where nginx serves it at seminar.starkpeople.in. One-time setup (server script and GitHub secrets) is in [deploy/README.md](deploy/README.md).
+Every push to `main` is built, tested and published to the `deploy-build` branch. The Hostinger VPS picks it up within a minute and nginx serves it at seminar.starkpeople.in. No secrets are needed. How it works and the one-time server setup are in [deploy/README.md](deploy/README.md).

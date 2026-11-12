@@ -1,19 +1,22 @@
-# Builds the app and deploys it to https://seminar.starkpeople.in on the Hostinger VPS.
-# Runs on every push to main, and on demand from the Actions tab (Run workflow).
-# One-time server setup and the required secrets: see deploy/README.md.
-name: Deploy to seminar.starkpeople.in
+# Builds the app on every push to main and publishes the build to the `deploy-build`
+# branch. The VPS checks that branch every minute and serves the new build at
+# https://seminar.starkpeople.in (see deploy/README.md). No secrets needed.
+name: Build and publish
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
-  group: deploy-seminar
+  group: publish
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  publish:
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -35,60 +38,33 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Check secrets are set
-        id: secrets
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-        run: |
-          missing=""
-          [ -n "$VPS_HOST" ] || missing="$missing VPS_HOST"
-          [ -n "$VPS_USER" ] || missing="$missing VPS_USER"
-          [ -n "$VPS_SSH_KEY" ] || missing="$missing VPS_SSH_KEY"
-          if [ -n "$missing" ]; then
-            echo "::warning::Built and tested, but NOT deployed — missing repository secrets:$missing. Run deploy/setup-server.sh on the VPS and add the values it prints (see deploy/README.md)."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Stamp the build
+        run: echo "$GITHUB_SHA" > dist/version.txt
 
-      - name: Set up SSH
-        if: steps.secrets.outputs.ready == 'true'
+      - name: Publish to the deploy-build branch
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          TOKEN: ${{ github.token }}
         run: |
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          if [ -n "$VPS_KNOWN_HOSTS" ]; then
-            printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            echo "::warning::VPS_KNOWN_HOSTS is not set; trusting the host key on first use."
-            ssh-keyscan -H "$VPS_HOST" > ~/.ssh/known_hosts
-          fi
+          cd dist
+          git init -q -b deploy-build
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Build of ${GITHUB_SHA}"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" deploy-build
 
-      - name: Upload build
-        if: steps.secrets.outputs.ready == 'true'
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
+      - name: Wait for the server to publish it
         run: |
-          # --delay-updates swaps files in at the end, so visitors never see a half-copied site.
-          rsync -az --delete --delay-updates \
-            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
-            dist/ "$VPS_USER@$VPS_HOST:/var/www/seminar.starkpeople.in/"
-
-      - name: Verify live site
-        if: steps.secrets.outputs.ready == 'true'
-        run: |
-          sleep 2
-          for url in https://seminar.starkpeople.in/ http://seminar.starkpeople.in/; do
-            if curl -fsSL --max-time 15 "$url" | grep -q '<title>Seminar Presenter</title>'; then
-              echo "Live: $url"; exit 0
-            fi
+          live=""
+          for i in $(seq 1 30); do
+            live=$(curl -fsSL --max-time 10 https://seminar.starkpeople.in/version.txt 2>/dev/null \
+                || curl -fsSL --max-time 10 http://seminar.starkpeople.in/version.txt 2>/dev/null || true)
+            if [ "$live" = "$GITHUB_SHA" ]; then echo "Live at https://seminar.starkpeople.in"; exit 0; fi
+            sleep 10
           done
-          echo "::error::Uploaded, but the site isn't serving the new build yet. Check nginx on the VPS (see deploy/README.md)."
-          exit 1
+          if [ -z "$live" ] || ! printf '%s' "$live" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::warning::Published, but seminar.starkpeople.in isn't serving builds yet — run the 'Set up server' workflow once."
+          else
+            echo "::error::The server is still on build $live after 5 minutes. Check 'journalctl -u seminar-sync' on the VPS."
+            exit 1
+          fi

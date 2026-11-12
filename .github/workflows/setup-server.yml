@@ -1,0 +1,60 @@
+# One-time (re-runnable) server setup for seminar.starkpeople.in.
+#
+# Creates a throwaway SSH key on this runner and prints its PUBLIC half. Someone with
+# access to the Hostinger account adds that public key to the VPS (Hostinger API
+# or hPanel → VPS → SSH keys); this job then connects, runs deploy/setup-server.sh,
+# and removes the key again. The private key never leaves this runner, which is
+# destroyed when the job ends.
+name: Set up server
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VPS_HOST: 76.13.241.150
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create a one-time SSH key
+        run: |
+          install -d -m 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N "" -C "tabswitcher-setup-${GITHUB_RUN_ID}" -f ~/.ssh/setup_key
+          echo "Add this PUBLIC key to the VPS root user (it is removed again at the end):"
+          echo "SETUP_PUBLIC_KEY: $(cat ~/.ssh/setup_key.pub)"
+
+      - name: Wait until the key is authorised (up to 15 minutes)
+        run: |
+          for i in $(seq 1 90); do
+            if ssh -i ~/.ssh/setup_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
+                 root@"$VPS_HOST" true 2>/dev/null; then
+              echo "Connected."; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Could not log in to $VPS_HOST as root with the one-time key."
+          exit 1
+
+      - name: Run setup-server.sh on the VPS
+        run: ssh -i ~/.ssh/setup_key -o BatchMode=yes root@"$VPS_HOST" 'bash -s' < deploy/setup-server.sh
+
+      - name: Remove the one-time key from the server
+        if: always()
+        run: |
+          ssh -i ~/.ssh/setup_key -o BatchMode=yes -o ConnectTimeout=8 root@"$VPS_HOST" \
+            "sed -i '/tabswitcher-setup-${GITHUB_RUN_ID}\$/d' /root/.ssh/authorized_keys" 2>/dev/null \
+            && echo "Removed." || echo "Could not remove the key over SSH (it may never have been added)."
+
+      - name: Check the site
+        run: |
+          for url in https://seminar.starkpeople.in/ http://seminar.starkpeople.in/; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$url" || true)
+            echo "$url → $code"
+          done

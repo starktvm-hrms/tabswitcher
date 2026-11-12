@@ -1,45 +1,51 @@
 #!/usr/bin/env bash
 # One-time setup on the Hostinger VPS for https://seminar.starkpeople.in
 #
-# Run as root on the VPS (hPanel → VPS → Browser terminal, or `ssh root@76.13.241.150`):
-#   bash setup-server.sh
+# Normally run for you by the "Set up server" GitHub Actions workflow. It can
+# also be run by hand as root (hPanel → VPS → Browser terminal):  bash setup-server.sh
 #
 # What it does — and only this; other nginx sites on the server are not touched:
-#   1. Creates a locked-down `deploy` user that can only write the site folder.
-#   2. Creates /var/www/seminar.starkpeople.in with a placeholder page.
-#   3. Adds ONE nginx site file for seminar.starkpeople.in, checks the whole nginx
-#      config with `nginx -t`, and reloads only if the check passes.
-#   4. Gets an HTTPS certificate for the subdomain with certbot.
-#   5. Creates an SSH key for GitHub Actions and prints the values to paste
-#      into the repository's secrets.
+#   1. Installs nginx, git, rsync and certbot if they are missing.
+#   2. Adds ONE nginx site file for seminar.starkpeople.in, checks the whole nginx
+#      config with `nginx -t`, and reloads only if that passes (otherwise it
+#      removes its own file again).
+#   3. Gets an HTTPS certificate for the subdomain with certbot.
+#   4. Installs a small sync job (systemd timer, every minute) that fetches the
+#      latest build from the public `deploy-build` branch on GitHub and copies it
+#      into the web root. No credentials are stored on the server.
 # Safe to run again: every step checks what is already there.
 set -euo pipefail
 
 DOMAIN="seminar.starkpeople.in"
+REPO_URL="https://github.com/starktvm-hrms/tabswitcher.git"
+BRANCH="deploy-build"
 WEB_ROOT="/var/www/${DOMAIN}"
-DEPLOY_USER="deploy"
-KEY="/root/${DOMAIN}-github-deploy"
+SRC="/opt/${DOMAIN}"
+SYNC_USER="seminar-sync"
 
 [ "$(id -u)" -eq 0 ] || { echo "Please run as root (sudo bash $0)"; exit 1; }
-say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+say() { printf '\n==> %s\n' "$*"; }
 
-say "Installing nginx, rsync and certbot if missing"
+say "Packages"
 need=()
 command -v nginx   >/dev/null || need+=(nginx)
+command -v git     >/dev/null || need+=(git)
 command -v rsync   >/dev/null || need+=(rsync)
 command -v certbot >/dev/null || need+=(certbot python3-certbot-nginx)
 if [ ${#need[@]} -gt 0 ]; then
-  apt-get update -y && apt-get install -y "${need[@]}"
+  echo "installing: ${need[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get update -y -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${need[@]}"
 else
   echo "all present"
 fi
 
-say "Deploy user and web root"
-id "$DEPLOY_USER" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash "$DEPLOY_USER"
-install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$WEB_ROOT"
+say "Sync user and folders"
+id "$SYNC_USER" >/dev/null 2>&1 || useradd --system --home-dir "$SRC" --shell /usr/sbin/nologin "$SYNC_USER"
+install -d -m 755 -o "$SYNC_USER" -g "$SYNC_USER" "$WEB_ROOT" "$SRC"
 if [ ! -e "$WEB_ROOT/index.html" ]; then
-  echo "<!doctype html><title>Seminar Presenter</title><p>Waiting for the first deploy from GitHub…</p>" > "$WEB_ROOT/index.html"
-  chown "$DEPLOY_USER:$DEPLOY_USER" "$WEB_ROOT/index.html"
+  echo "<!doctype html><title>Seminar Presenter</title><p>Waiting for the first build from GitHub…</p>" > "$WEB_ROOT/index.html"
+  chown "$SYNC_USER:$SYNC_USER" "$WEB_ROOT/index.html"
 fi
 
 say "nginx site for ${DOMAIN}"
@@ -52,7 +58,7 @@ if [ -e "$SITE" ]; then
   echo "$SITE already exists — leaving it as is (certbot may have added HTTPS to it)."
 else
   cat > "$SITE" <<NGINX
-# Seminar Presenter (static Vite build) — deployed by GitHub Actions from starktvm-hrms/tabswitcher
+# Seminar Presenter (static Vite build) — synced from github.com/starktvm-hrms/tabswitcher (deploy-build branch)
 server {
     listen 80;
     listen [::]:80;
@@ -68,7 +74,7 @@ server {
         try_files \$uri =404;
     }
 
-    # The app shell must always be fresh so new deploys show up immediately.
+    # The app shell and version stamp must always be fresh so new builds show up immediately.
     location / {
         add_header Cache-Control "no-cache";
         try_files \$uri \$uri/ /index.html;
@@ -81,7 +87,7 @@ server {
     gzip_types text/css application/javascript image/svg+xml application/json;
 }
 NGINX
-  [ -n "$LINK" ] && ln -sf "$SITE" "$LINK"
+  if [ -n "$LINK" ]; then ln -sf "$SITE" "$LINK"; fi
 fi
 
 if nginx -t; then
@@ -95,43 +101,75 @@ fi
 say "HTTPS certificate"
 if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
   echo "certificate already exists"
+elif getent hosts "$DOMAIN" >/dev/null; then
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect \
+    || echo "certbot failed — the site still works on http://${DOMAIN}. Re-run this script later to retry."
 else
-  if getent hosts "$DOMAIN" >/dev/null; then
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect \
-      || echo "certbot failed — the site still works on http://${DOMAIN}. Re-run this script later to retry."
-  else
-    echo "DNS for ${DOMAIN} doesn't resolve yet — re-run this script in a few minutes to get HTTPS."
-  fi
+  echo "DNS for ${DOMAIN} doesn't resolve yet — re-run this script in a few minutes to get HTTPS."
 fi
 
-say "SSH key for GitHub Actions"
-if [ ! -e "$KEY" ]; then
-  ssh-keygen -t ed25519 -N "" -C "github-actions@${DOMAIN}" -f "$KEY" >/dev/null
+say "Sync job (GitHub deploy-build branch → ${WEB_ROOT})"
+cat > /usr/local/bin/seminar-sync <<SYNC
+#!/usr/bin/env bash
+# Fetches the latest build of the Seminar Presenter and publishes it if it changed.
+set -euo pipefail
+exec 9>"${SRC}/.lock"; flock -n 9 || exit 0
+if [ ! -d "${SRC}/repo/.git" ]; then
+  git clone -q --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${SRC}/repo"
+else
+  git -C "${SRC}/repo" fetch -q --depth 1 origin "${BRANCH}"
+  git -C "${SRC}/repo" reset -q --hard FETCH_HEAD
 fi
-install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "/home/${DEPLOY_USER}/.ssh"
-AUTH="/home/${DEPLOY_USER}/.ssh/authorized_keys"
-touch "$AUTH"
-grep -qF "$(cut -d' ' -f2 "$KEY.pub")" "$AUTH" || cat "$KEY.pub" >> "$AUTH"
-chown "$DEPLOY_USER:$DEPLOY_USER" "$AUTH"; chmod 600 "$AUTH"
+new=\$(git -C "${SRC}/repo" rev-parse HEAD)
+[ "\$new" = "\$(cat "${SRC}/published" 2>/dev/null)" ] && exit 0
+# --checksum: builds can produce same-size files with near-identical mtimes; compare content instead.
+rsync -a --checksum --delete --delay-updates --exclude .git "${SRC}/repo/" "${WEB_ROOT}/"
+echo "\$new" > "${SRC}/published"
+echo "published \$new"
+SYNC
+chmod 755 /usr/local/bin/seminar-sync
 
-HOST_IP="$(curl -4 -s --max-time 5 https://ifconfig.me || hostname -I | awk '{print $1}')"
-cat <<EOF
+cat > /etc/systemd/system/seminar-sync.service <<UNIT
+[Unit]
+Description=Publish the latest Seminar Presenter build from GitHub
+After=network-online.target
+Wants=network-online.target
 
-────────────────────────────────────────────────────────────────────────
- Done. Add these as repository secrets in GitHub:
- github.com/starktvm-hrms/tabswitcher → Settings → Secrets and variables
- → Actions → New repository secret
+[Service]
+Type=oneshot
+User=${SYNC_USER}
+Group=${SYNC_USER}
+Environment=HOME=${SRC}
+ExecStart=/usr/local/bin/seminar-sync
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=${SRC} ${WEB_ROOT}
+PrivateTmp=true
+UNIT
 
-   VPS_HOST         ${HOST_IP}
-   VPS_USER         ${DEPLOY_USER}
-   VPS_SSH_KEY      (everything between the lines below, including BEGIN/END)
-   VPS_KNOWN_HOSTS  (the host-key lines further below)
-────────────────────────────────────────────────────────────────────────
-$(cat "$KEY")
-────────────────────────────────────────────────────────────────────────
- VPS_KNOWN_HOSTS:
-$(ssh-keyscan -t ed25519,ecdsa,rsa localhost 2>/dev/null | sed "s/^localhost/${HOST_IP}/")
-────────────────────────────────────────────────────────────────────────
- After saving the secrets you can delete the key from the server:
-   rm ${KEY} ${KEY}.pub
-EOF
+cat > /etc/systemd/system/seminar-sync.timer <<UNIT
+[Unit]
+Description=Check GitHub for a new Seminar Presenter build every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now seminar-sync.timer
+if systemctl start seminar-sync.service; then
+  journalctl -u seminar-sync.service -n 5 --no-pager || true
+else
+  echo "First sync failed (the deploy-build branch may not exist yet). The timer retries every minute."
+  journalctl -u seminar-sync.service -n 20 --no-pager || true
+fi
+
+say "Done"
+echo "Site:      http://${DOMAIN}  (https once the certificate is issued)"
+echo "Published: $(cat "${SRC}/published" 2>/dev/null || echo 'nothing yet')"
+echo "Status:    systemctl status seminar-sync.timer   ·   journalctl -u seminar-sync"
