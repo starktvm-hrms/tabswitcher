@@ -7,24 +7,39 @@ export type CloudWord = { key: string; text: string; count: number };
 export type PollResults = PollInfo & { total: number; participants: number; words: CloudWord[]; hidden: number };
 export type HostPoll = { code: string; hostKey: string };
 
-async function call<T>(path: string, init: RequestInit & { hostKey?: string } = {}): Promise<T> {
-  const { hostKey, ...rest } = init;
-  let res: Response;
-  try {
-    res = await fetch(`/api${path}`, {
-      ...rest,
-      headers: { 'Content-Type': 'application/json', ...(hostKey ? { 'X-Host-Key': hostKey } : {}), ...(rest.headers ?? {}) },
-    });
-  } catch {
-    throw new Error('Can’t reach the poll server. Check your connection and try again.');
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * JSON request to the poll server. Network errors, 429 (busy) and 5xx are retried
+ * with backoff + jitter, so a burst of hundreds of phones on one venue Wi-Fi smooths
+ * itself out instead of showing errors.
+ */
+async function call<T>(path: string, init: RequestInit & { hostKey?: string; retries?: number } = {}): Promise<T> {
+  const { hostKey, retries = 4, ...rest } = init;
+  for (let attempt = 0; ; attempt++) {
+    let res: Response | undefined;
+    try {
+      res = await fetch(`/api${path}`, {
+        ...rest,
+        headers: { 'Content-Type': 'application/json', ...(hostKey ? { 'X-Host-Key': hostKey } : {}), ...(rest.headers ?? {}) },
+      });
+    } catch {
+      res = undefined;
+    }
+    const retryable = !res || res.status === 429 || res.status >= 500;
+    if (retryable && attempt < retries) {
+      await sleep(Math.min(8000, 600 * 2 ** attempt) * (0.5 + Math.random()));
+      continue;
+    }
+    if (!res) throw new Error('Can’t reach the poll server. Check your connection and try again.');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+    return body as T;
   }
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
-  return body as T;
 }
 
 export const createPoll = (question: string, perPerson: number) =>
-  call<PollInfo & { hostKey: string }>('/polls', { method: 'POST', body: JSON.stringify({ question, perPerson }) });
+  call<PollInfo & { hostKey: string }>('/polls', { method: 'POST', retries: 0, body: JSON.stringify({ question, perPerson }) });
 export const getPoll = (code: string) => call<PollInfo>(`/polls/${encodeURIComponent(code)}`);
 export const sendAnswer = (code: string, pid: string, text: string) =>
   call<{ ok: true; left: number }>(`/polls/${encodeURIComponent(code)}/answers`, { method: 'POST', body: JSON.stringify({ pid, text }) });

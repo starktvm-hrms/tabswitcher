@@ -43,7 +43,7 @@ jobs:
           echo "$GITHUB_SHA" > dist/version.txt
           # The VPS sync job installs .server/ as the poll server (it is not served as part of the site).
           mkdir -p dist/.server
-          cp server/poll-core.mjs server/poll-server.mjs dist/.server/
+          find server -maxdepth 1 -name "*.mjs" ! -name "*.test.mjs" -exec cp -t dist/.server/ {} +
 
       - name: Publish to the deploy-build branch
         env:

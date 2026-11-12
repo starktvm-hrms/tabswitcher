@@ -19,6 +19,7 @@ import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createWorkspaces } from './workspace.mjs';
 import {
   LIMITS, checkAnswer, cleanText, isCode, makeCode, publicInfo, rateLimiter, results, validateNewPoll, wordKey,
 } from './poll-core.mjs';
@@ -107,16 +108,16 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify(body));
   };
-  const readBody = (req) => new Promise((resolve, reject) => {
+  const readBody = (req, limit = LIMITS.bodyBytes) => new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     // Oversized bodies are drained (not cut off) so the client still receives the 413.
     req.on('data', (c) => {
       size += c.length;
-      if (size <= LIMITS.bodyBytes) chunks.push(c);
+      if (size <= limit) chunks.push(c);
     });
     req.on('end', () => {
-      if (size > LIMITS.bodyBytes) return reject(Object.assign(new Error('Request too large'), { status: 413 }));
+      if (size > limit) return reject(Object.assign(new Error('Request too large'), { status: 413 }));
       if (!chunks.length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(Object.assign(new Error('Invalid JSON'), { status: 400 })); }
     });
@@ -129,11 +130,14 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     return (direct === '127.0.0.1' || direct === '::1' || direct === '::ffff:127.0.0.1') && typeof fwd === 'string' ? fwd : direct;
   };
 
-  // A whole seminar can share one Wi-Fi address, so limits are per-IP but generous;
-  // the per-participant answer limit does the real work.
-  const allowCreate = rateLimiter({ max: 30, windowMs: 3600_000 });
-  const allowAnswer = rateLimiter({ max: 1200, windowMs: 60_000 });
-  const allowAny = rateLimiter({ max: 3000, windowMs: 60_000 });
+  // A whole audience usually shares one venue Wi-Fi (one public IP), so per-IP limits
+  // are sized for ~1000 people answering in the same minute; the per-participant
+  // answer limit and the per-poll cap do the real work against spam.
+  const allowCreate = rateLimiter({ max: 60, windowMs: 3600_000 });
+  const allowAnswer = rateLimiter({ max: 6000, windowMs: 60_000 });
+  const allowAny = rateLimiter({ max: 20000, windowMs: 60_000 });
+  const allowWsCreate = rateLimiter({ max: 20, windowMs: 3600_000 });
+  const workspaces = await createWorkspaces({ dataDir, json, readJson: readBody, log });
 
   // ---- routes ------------------------------------------------------------------
   async function handle(req, res) {
@@ -141,7 +145,8 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     const ip = clientIp(req);
     if (!allowAny(ip)) return json(res, 429, { error: 'Too many requests. Please wait a moment.' });
 
-    if (url.pathname === '/api/health') return json(res, 200, { ok: true, polls: polls.size });
+    if (url.pathname === '/api/health') return json(res, 200, { ok: true, polls: polls.size, workspaces: workspaces.spaces.size });
+    if (await workspaces.handle(req, res, url, { allowCreate: allowWsCreate, ip })) return;
 
     if (url.pathname === '/api/polls' && req.method === 'POST') {
       if (!allowCreate(ip)) return json(res, 429, { error: 'Too many polls created. Try again later.' });
@@ -246,7 +251,7 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
   // Long-lived SSE connections must not be cut by Node's default timeouts.
   server.requestTimeout = 0;
   server.headersTimeout = 15_000;
-  return { server, polls, flush };
+  return { server, polls, workspaces, flush };
 }
 
 // Run directly: `node server/poll-server.mjs`

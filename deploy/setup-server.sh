@@ -14,7 +14,8 @@
 #   4. Installs a sync job (systemd timer, every minute) that fetches the latest
 #      build from the public `deploy-build` branch on GitHub: the site goes to the
 #      web root, the poll server code to /opt/seminar.starkpeople.in/server.
-#   5. Runs the poll server (systemd service, localhost only, unprivileged user).
+#   5. Runs the poll + workspace server (systemd service, localhost only, unprivileged user):
+#      live polls, and saved presentations/uploaded files so they open on any computer.
 # No credentials are stored on the server. Safe to run again.
 set -euo pipefail
 
@@ -94,7 +95,7 @@ BACKUP_DIR=$(mktemp -d)
 SITE_EXISTED=$([ -e "$SITE" ] && echo 1 || echo 0)
 
 cat > "$SNIPPET" <<NGINX
-# Poll server for ${DOMAIN} (managed by setup-server.sh)
+# Poll + workspace server for ${DOMAIN} (managed by setup-server.sh)
 location /api/ {
     proxy_pass http://127.0.0.1:${PORT};
     proxy_http_version 1.1;
@@ -105,7 +106,18 @@ location /api/ {
     proxy_buffering off;
     proxy_cache off;
     proxy_read_timeout 1h;
-    client_max_body_size 16k;
+    # Uploaded PDFs/videos stream straight to the server (it enforces the real limits).
+    client_max_body_size 520m;
+    proxy_request_buffering off;
+    proxy_send_timeout 1h;
+}
+# Uploaded presentation files (unguessable URLs; Range requests for video seeking).
+location /files/ {
+    proxy_pass http://127.0.0.1:${PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header Connection "";
+    proxy_read_timeout 1h;
 }
 NGINX
 
@@ -250,7 +262,7 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${SRC}/data
 PrivateTmp=true
-MemoryMax=300M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

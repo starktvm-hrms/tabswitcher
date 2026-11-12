@@ -4,7 +4,7 @@ export const LIMITS = {
   questionMax: 200,
   answerMax: 40,
   perPersonMax: 10,
-  answersPerPoll: 5000,
+  answersPerPoll: 20000,
   bodyBytes: 4096,
 };
 

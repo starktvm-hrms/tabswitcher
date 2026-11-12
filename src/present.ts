@@ -15,6 +15,9 @@ export type Presentation = {
   original?: string;
   /** Short label of the provider/file type, e.g. "Google Slides", "PDF". */
   source: string;
+  /** For uploaded files: the server file id (the URL is in `src`) and size in bytes. */
+  fileId?: string;
+  size?: number;
   /** For live polls: the join code and the presenter's secret key (kept only in this browser). */
   poll?: { code: string; hostKey: string };
 };

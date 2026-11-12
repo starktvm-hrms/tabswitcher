@@ -4,6 +4,8 @@ import { baseName, fileKind, move, toEmbed, type Presentation } from './present'
 import { usePresentations } from './presentStore';
 import { createPoll, hostApi, joinUrl } from './poll/api';
 import { PollStage } from './poll/PollStage';
+import { Qr } from './poll/Qr';
+import { parseShareLink, shareLink } from './workspace';
 
 /**
  * Presentation player. Browsers always leave fullscreen when you switch browser
@@ -22,6 +24,7 @@ export default function Presenter() {
   const [pollQ, setPollQ] = useState('');
   const [pollPer, setPollPer] = useState(3);
   const [pollBusy, setPollBusy] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const fullscreen = useFullscreen(stageRef, { lockEscape: false });
 
@@ -45,8 +48,8 @@ export default function Presenter() {
     for (const f of Array.from(files)) {
       const k = fileKind(f.name, f.type);
       if ('error' in k) { errs.push(k.error); continue; }
-      const saved = await store.addFile(f, { name: baseName(f.name), kind: k.kind, source: k.source });
-      if (!saved) errs.push(`${f.name}: added, but couldn’t be saved in this browser — it will be gone after a reload.`);
+      const err = await store.addFile(f, { name: baseName(f.name), kind: k.kind, source: k.source });
+      if (err) errs.push(err);
     }
     setErrors(errs);
   };
@@ -91,7 +94,9 @@ export default function Presenter() {
             at the bottom of the screen without leaving fullscreen.
           </p>
         </div>
-        <div className="row gap">
+        <div className="row gap wrap">
+          <SyncBadge status={store.status} />
+          <button className="btn" onClick={() => setShareOpen((v) => !v)} aria-expanded={shareOpen}>⇆ Use on another computer</button>
           <ThemeToggle />
           <button className="btn btn-primary" disabled={!items.length || !fullscreen.supported} onClick={() => presentFrom(activeId)}>
             ▶ Present fullscreen
@@ -99,9 +104,12 @@ export default function Presenter() {
         </div>
       </header>
 
+      {store.message && <div className={`sync-msg ${store.status}`} role="status">{store.message}</div>}
+      {shareOpen && <SharePanel store={store} onClose={() => setShareOpen(false)} />}
+
       <div className="present-grid">
         <div className="card">
-          <div className="card-head"><h2>Presentations</h2><span className="muted small">{items.length} saved in this browser</span></div>
+          <div className="card-head"><h2>Presentations</h2><span className="muted small">{items.length} in this workspace</span></div>
           <div className="card-pad stack" style={{ gap: 10 }}>
             <form className="row gap" onSubmit={addLink}>
               <input
@@ -148,6 +156,13 @@ export default function Presenter() {
                 </div>
               </form>
             )}
+            {store.uploads.map((u) => (
+              <div key={u.id} className="upload-row" role="status">
+                <span className="grow">Uploading {u.name}…</span>
+                <span className="muted small">{Math.round(u.progress * 100)}%</span>
+                <div className="upload-bar"><i style={{ width: `${u.progress * 100}%` }} /></div>
+              </div>
+            ))}
             {errors.map((err) => <div key={err} className="present-error" role="alert">{err}</div>)}
           </div>
 
@@ -168,7 +183,7 @@ export default function Presenter() {
                     />
                     <div className="muted small row gap">
                       <span>{p.source}</span>
-                      {store.missing.has(p.id) && <span className="bad">· file missing, upload it again</span>}
+                      {store.missing.has(p.id) && <span className="bad">· file not found on this computer, upload it again</span>}
                       {p.original && <a href={p.original} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>open original ↗</a>}
                       {p.poll && <span>· code <b>{p.poll.code}</b></span>}
                       {p.poll && <a href={joinUrl(p.poll.code)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>audience page ↗</a>}
@@ -206,6 +221,62 @@ export default function Presenter() {
         />
       </div>
     </main>
+  );
+}
+
+function SyncBadge({ status }: { status: ReturnType<typeof usePresentations>['status'] }) {
+  const label = { connecting: 'Connecting…', saving: 'Saving…', saved: '✓ Saved', offline: '⚠ Offline', error: '⚠ Not saved' }[status];
+  return <span className={`sync-badge ${status}`} title="Your presentations are stored on the server and open on any computer with the workspace link">{label}</span>;
+}
+
+/** Link + QR code to open this workspace on another computer, and a way to open a different one. */
+function SharePanel({ store, onClose }: { store: ReturnType<typeof usePresentations>; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const [paste, setPaste] = useState('');
+  const [err, setErr] = useState<string>();
+  const link = store.creds ? shareLink(store.creds) : '';
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch { setErr('Couldn’t copy — select the link and copy it by hand.'); }
+  };
+  const open = async (e: FormEvent) => {
+    e.preventDefault();
+    const c = parseShareLink(paste);
+    if (!c) { setErr('That isn’t a workspace link. It looks like https://seminar.starkpeople.in/w/…#…'); return; }
+    setErr(undefined);
+    await store.switchWorkspace(c);
+    setPaste('');
+    onClose();
+  };
+  return (
+    <section className="card card-pad share-panel" aria-label="Use on another computer">
+      <div className="share-main">
+        <div className="stack" style={{ gap: 10, flex: 1, minWidth: 0 }}>
+          <h2>Use on another computer</h2>
+          <p className="muted small" style={{ margin: 0 }}>
+            Open this link on any computer (or scan the code) to get the same presentations, files and polls.
+            Anyone with the link can view and change this workspace, so share it only with people you trust.
+          </p>
+          {link ? (
+            <div className="row gap">
+              <input readOnly value={link} onFocus={(e) => e.currentTarget.select()} aria-label="Workspace link" />
+              <button className="btn btn-primary" onClick={copy}>{copied ? 'Copied ✓' : 'Copy link'}</button>
+            </div>
+          ) : <p className="muted small">Connecting to the server…</p>}
+          <form className="row gap" onSubmit={open}>
+            <input value={paste} onChange={(e) => setPaste(e.target.value)} placeholder="Or paste a workspace link to open it here" aria-label="Open a workspace link" />
+            <button className="btn" type="submit" disabled={!paste.trim()}>Open</button>
+          </form>
+          {err && <div className="present-error" role="alert">{err}</div>}
+          <div className="row gap">
+            <button className="link-btn small" onClick={() => { if (window.confirm('Start a new, empty workspace in this browser? Keep the current link if you want to come back to this one.')) store.newWorkspace(); }}>Start a new empty workspace</button>
+            <span className="grow" />
+            <button className="btn btn-sm" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        {link && <div className="share-qr"><Qr text={link} label="QR code with the workspace link" /></div>}
+      </div>
+    </section>
   );
 }
 

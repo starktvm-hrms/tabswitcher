@@ -6,7 +6,7 @@ export default defineConfig({
   // Absolute base: the audience page lives at /p/CODE, so asset URLs must not be relative.
   base: '/',
   server: {
-    // `npm run server` runs the poll API locally on 8791.
-    proxy: { '/api': 'http://127.0.0.1:8791' },
+    // `npm run server` runs the poll + workspace API locally on 8791.
+    proxy: { '/api': 'http://127.0.0.1:8791', '/files': 'http://127.0.0.1:8791' },
   },
 });

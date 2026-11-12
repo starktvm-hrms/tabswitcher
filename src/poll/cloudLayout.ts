@@ -67,6 +67,7 @@ export function layoutCloud(words: LayoutInput[], opts: LayoutOptions): Placed[]
       if (w > width - 8) { dropped++; continue; }
       const item: Placed = { ...word, size, w, h, x: width / 2, y: height / 2, color: pickColor(word.key, placed, colors) };
       let ok = false;
+      let lastHit = -1; // the word that blocked the previous spot usually blocks the next one too
       for (let t = 0; t < 2000; t += 0.1) {
         const r = 2.4 * t;
         item.x = width / 2 + r * Math.cos(t) * Math.max(1, ratio * 0.9);
@@ -75,7 +76,9 @@ export function layoutCloud(words: LayoutInput[], opts: LayoutOptions): Placed[]
           if (r > Math.max(width, height)) break;
           continue;
         }
-        if (!placed.some((p) => overlaps(p, item, padding))) { ok = true; break; }
+        if (lastHit >= 0 && overlaps(placed[lastHit], item, padding)) continue;
+        lastHit = placed.findIndex((p) => overlaps(p, item, padding));
+        if (lastHit < 0) { ok = true; break; }
       }
       if (ok) placed.push(item); else dropped++;
     }

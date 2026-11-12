@@ -25,20 +25,36 @@ export function WordCloud({ words, onWordClick, emptyText }: {
     return () => ro.disconnect();
   }, []);
 
+  // While answers pour in (hundreds of phones), redraw at most every 700 ms.
+  const [shown, setShown] = useState(words);
+  const lastDraw = useRef(0);
+  useEffect(() => {
+    const wait = Math.max(0, 700 - (Date.now() - lastDraw.current));
+    const t = window.setTimeout(() => { lastDraw.current = Date.now(); setShown(words); }, wait);
+    return () => window.clearTimeout(t);
+  }, [words]);
+
+  // Text widths are measured once per word and scaled (width is linear in font size).
+  const widths = useRef(new Map<string, number>());
   const placed = useMemo(() => {
     if (!box.w || !box.h) return [];
     const ctx = document.createElement('canvas').getContext('2d');
+    if (ctx) ctx.font = FONT.replace('{size}', '100');
     const measure = (text: string, size: number) => {
-      if (!ctx) return text.length * size * 0.6;
-      ctx.font = FONT.replace('{size}', String(size));
-      return ctx.measureText(text).width;
+      let w100 = widths.current.get(text);
+      if (w100 === undefined) {
+        w100 = ctx ? ctx.measureText(text).width : text.length * 60;
+        if (widths.current.size > 5000) widths.current.clear();
+        widths.current.set(text, w100);
+      }
+      return (w100 * size) / 100;
     };
-    return layoutCloud(words, { width: box.w, height: box.h, measure, colors: CLOUD_COLORS });
-  }, [words, box]);
+    return layoutCloud(shown, { width: box.w, height: box.h, measure, colors: CLOUD_COLORS });
+  }, [shown, box]);
 
   return (
     <div className="cloud" ref={boxRef}>
-      {words.length === 0 && <div className="cloud-empty">{emptyText ?? 'Waiting for answers…'}</div>}
+      {shown.length === 0 && <div className="cloud-empty">{emptyText ?? 'Waiting for answers…'}</div>}
       {placed.map((p) => (
         <span
           key={p.key}

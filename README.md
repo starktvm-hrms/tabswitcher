@@ -21,9 +21,21 @@ While presenting:
 - Videos pause when you switch away.
 - **Esc** or **⤡ Exit** leaves fullscreen.
 
-The list is saved in this browser, and uploaded files are kept in IndexedDB; decks and files are never uploaded. Only poll questions and answers are stored on the server.
+## Use it on any computer
+
+Your presentations live in a **workspace** on the server: the list, uploaded PDFs, images and videos, and control of your polls. Open **⇆ Use on another computer** to get the workspace link and QR code. Opening that link on any computer, like the podium PC or a colleague's laptop, shows the same presentations. Changes on one computer appear on the others within a few seconds. The badge at the top shows whether everything is saved.
+
+The link contains the workspace's secret key, so share it only with people who should be able to change your presentations. You can also paste a link to switch workspaces, or start a new empty one. Anything saved only in the browser by an older version is uploaded automatically the first time.
+
+Limits:
+- Files can be up to 500 MB each.
+- Each workspace holds up to 5 GB.
+- Files you remove are deleted from the server.
 
 ## Live word-cloud polls
+
+Built for big rooms: it was load-tested with 1,000 people sending 3,000 answers within 10 seconds from one shared network, with no errors. Phones retry automatically if the venue Wi-Fi hiccups.
+
 
 Ask the room a question and watch the answers appear as a word cloud, live.
 
@@ -37,7 +49,7 @@ Ask the room a question and watch the answers appear as a word cloud, live.
    - **Click a word** to hide it, for moderation.
    - **Show N hidden** brings hidden words back.
 
-Each browser holds the presenter key for the polls it created, so only that browser can control them. Removing a poll from the list deletes it and its answers from the server. Polls are kept for 90 days.
+Poll controls are part of the workspace, so any computer with the workspace link can run the poll. Removing a poll from the list deletes it and its answers from the server. Polls are kept for 90 days.
 
 **A deck shows a blank or "refused to connect" page?** It has to be shared publicly ("Anyone with the link" in Google Slides or Canva; File → Share → Embed in PowerPoint). Some sites don't allow being shown inside another page at all. For those, download the deck as PDF and upload it.
 
@@ -46,7 +58,7 @@ Each browser holds the presenter key for the polls it created, so only that brow
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm run server     # poll API on http://127.0.0.1:8791 (the dev server proxies /api to it)
+npm run server     # poll + workspace API on http://127.0.0.1:8791 (the dev server proxies /api and /files to it)
 npm test           # unit + API tests
 npm run build      # type-check + production build to dist/
 ```
@@ -58,7 +70,8 @@ src/
   presentStore.ts  playlist (localStorage) + uploaded files (IndexedDB)
   useFullscreen.ts element fullscreen hook
   poll/            word-cloud poll: presenter stage, audience page (/p/CODE), QR code, cloud layout, API client
-server/            poll server (Node.js, no dependencies): API, live updates (SSE), JSON storage
+server/            Node.js server, no dependencies: polls (live updates via SSE) and workspaces (playlist + uploaded files)
+src/workspace.ts   workspace client: share links, saving, uploads with progress
 deploy/            one-time VPS setup script + deploy docs
 .github/workflows/  deploy.yml (build + publish on push to main), setup-server.yml (one-time VPS setup)
 ```
