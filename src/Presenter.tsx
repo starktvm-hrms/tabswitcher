@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { useFullscreen } from './useFullscreen';
 import { baseName, fileKind, move, toEmbed, type Presentation } from './present';
 import { usePresentations } from './presentStore';
@@ -20,7 +20,9 @@ export default function Presenter() {
   const [link, setLink] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [pollForm, setPollForm] = useState(false);
+  const [pollForm, setPollForm] = useState<false | 'cloud' | 'choice'>(false);
+  const [pollOpts, setPollOpts] = useState<string[]>(['', '', '', '']);
+  const [pollCorrect, setPollCorrect] = useState<number | null>(null);
   const [pollQ, setPollQ] = useState('');
   const [pollPer, setPollPer] = useState(3);
   const [pollBusy, setPollBusy] = useState(false);
@@ -59,10 +61,15 @@ export default function Presenter() {
     if (!pollQ.trim() || pollBusy) return;
     setPollBusy(true);
     try {
-      const created = await createPoll(pollQ, pollPer);
-      const id = store.addLink({ name: created.question, kind: 'poll', src: '', source: 'Word cloud poll', poll: { code: created.code, hostKey: created.hostKey } });
+      const created = await createPoll(pollForm === 'choice'
+        ? { type: 'choice', question: pollQ, options: pollOpts, correct: pollCorrect }
+        : { type: 'cloud', question: pollQ, perPerson: pollPer });
+      const source = created.type === 'choice' ? (created.hasCorrect ? 'Quiz question' : 'Multiple-choice poll') : 'Word cloud poll';
+      const id = store.addLink({ name: created.question, kind: 'poll', src: '', source, poll: { code: created.code, hostKey: created.hostKey } });
       setActiveId(id);
       setPollQ('');
+      setPollOpts(['', '', '', '']);
+      setPollCorrect(null);
       setPollForm(false);
       setErrors([]);
     } catch (err) {
@@ -90,7 +97,7 @@ export default function Presenter() {
         <div>
           <h1>Seminar Presenter</h1>
           <p className="muted">
-            Line up decks, PDFs, videos and live word-cloud polls, then present them in one fullscreen window. Switch between them from the bar
+            Line up decks, PDFs, videos, audio and live polls (word cloud or multiple choice), then present them in one fullscreen window. Switch between them from the bar
             at the bottom of the screen without leaving fullscreen.
           </p>
         </div>
@@ -121,16 +128,19 @@ export default function Presenter() {
               <button className="btn" type="submit" disabled={!link.trim()}>Add link</button>
             </form>
             <div className="row gap wrap">
-              <button className="btn" onClick={() => fileRef.current?.click()}>⇪ Upload PDF / image / video</button>
+              <button className="btn" onClick={() => fileRef.current?.click()}>⇪ Upload PDF / image / video / audio</button>
               <input
                 ref={fileRef}
                 type="file"
                 multiple
                 hidden
-                accept="application/pdf,image/*,video/*,.pdf,.pptx,.ppt,.key"
+                accept="application/pdf,image/*,video/*,audio/*,.pdf,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.pptx,.ppt,.key"
                 onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }}
               />
-              <button className="btn" onClick={() => setPollForm((v) => !v)} aria-expanded={pollForm}>☁ Word-cloud poll</button>
+            </div>
+            <div className="row gap wrap">
+              <button className={`btn ${pollForm === 'cloud' ? 'btn-on' : ''}`} onClick={() => setPollForm((v) => (v === 'cloud' ? false : 'cloud'))} aria-expanded={pollForm === 'cloud'}>☁ Word-cloud poll</button>
+              <button className={`btn ${pollForm === 'choice' ? 'btn-on' : ''}`} onClick={() => setPollForm((v) => (v === 'choice' ? false : 'choice'))} aria-expanded={pollForm === 'choice'}>▤ Multiple-choice poll</button>
             </div>
             <span className="muted small">PowerPoint/Keynote files: export as PDF first.</span>
             {pollForm && (
@@ -139,20 +149,56 @@ export default function Presenter() {
                   value={pollQ}
                   onChange={(e) => setPollQ(e.target.value)}
                   maxLength={200}
-                  placeholder="Question, e.g. “One word to describe today?”"
+                  placeholder={pollForm === 'choice' ? 'Question, e.g. “Which topic should we cover next?”' : 'Question, e.g. “One word to describe today?”'}
                   aria-label="Poll question"
                   autoFocus
                 />
+                {pollForm === 'choice' && (
+                  <div className="opt-list">
+                    {pollOpts.map((o, i) => (
+                      <div key={i} className="opt-row">
+                        <span className="opt-letter">{String.fromCharCode(65 + i)}</span>
+                        <input
+                          value={o}
+                          onChange={(e) => setPollOpts((list) => list.map((x, j) => (j === i ? e.target.value : x)))}
+                          maxLength={80}
+                          placeholder={`Option ${String.fromCharCode(65 + i)}`}
+                          aria-label={`Option ${String.fromCharCode(65 + i)}`}
+                        />
+                        <label className="opt-correct" title="Mark as the correct answer (optional — turns this into a quiz)">
+                          <input type="radio" name="poll-correct" checked={pollCorrect === i} onChange={() => setPollCorrect(i)} onClick={() => { if (pollCorrect === i) setPollCorrect(null); }} />
+                          <span>Correct</span>
+                        </label>
+                        <button
+                          type="button" className="icon-btn present-act" title="Remove option" disabled={pollOpts.length <= 2}
+                          onClick={() => {
+                            setPollOpts((list) => list.filter((_, j) => j !== i));
+                            setPollCorrect((c) => (c === i ? null : c != null && c > i ? c - 1 : c));
+                          }}
+                        >×</button>
+                      </div>
+                    ))}
+                    <div className="row gap">
+                      <button type="button" className="link-btn small" disabled={pollOpts.length >= 8} onClick={() => setPollOpts((l) => [...l, ''])}>+ Add option</button>
+                      <span className="muted small">2–8 options. Marking a correct answer is optional; you can reveal it on screen.</span>
+                    </div>
+                  </div>
+                )}
                 <div className="row gap wrap">
-                  <label className="row gap small muted">
-                    Answers per person
-                    <select value={pollPer} onChange={(e) => setPollPer(Number(e.target.value))} style={{ width: 'auto' }}>
-                      {[1, 2, 3, 4, 5].map((n) => <option key={n}>{n}</option>)}
-                    </select>
-                  </label>
+                  {pollForm === 'cloud' && (
+                    <label className="row gap small muted">
+                      Answers per person
+                      <select value={pollPer} onChange={(e) => setPollPer(Number(e.target.value))} style={{ width: 'auto' }}>
+                        {[1, 2, 3, 4, 5].map((n) => <option key={n}>{n}</option>)}
+                      </select>
+                    </label>
+                  )}
                   <span className="grow" />
                   <button className="btn" type="button" onClick={() => setPollForm(false)}>Cancel</button>
-                  <button className="btn btn-primary" type="submit" disabled={!pollQ.trim() || pollBusy}>{pollBusy ? 'Creating…' : 'Create poll'}</button>
+                  <button
+                    className="btn btn-primary" type="submit"
+                    disabled={!pollQ.trim() || pollBusy || (pollForm === 'choice' && pollOpts.filter((o) => o.trim()).length < 2)}
+                  >{pollBusy ? 'Creating…' : 'Create poll'}</button>
                 </div>
               </form>
             )}
@@ -185,6 +231,7 @@ export default function Presenter() {
                       <span>{p.source}</span>
                       {store.missing.has(p.id) && <span className="bad">· file not found on this computer, upload it again</span>}
                       {p.original && <a href={p.original} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>open original ↗</a>}
+                      {p.kind === 'embed' && p.stopOnLeave && <span>· sound stops when you switch away</span>}
                       {p.poll && <span>· code <b>{p.poll.code}</b></span>}
                       {p.poll && <a href={joinUrl(p.poll.code)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>audience page ↗</a>}
                     </div>
@@ -192,6 +239,16 @@ export default function Presenter() {
                   <div className="row" onClick={(e) => e.stopPropagation()}>
                     <button className="icon-btn present-act" title="Move up" disabled={i === 0} onClick={() => store.reorder(move(items, i, i - 1))}>↑</button>
                     <button className="icon-btn present-act" title="Move down" disabled={i === items.length - 1} onClick={() => store.reorder(move(items, i, i + 1))}>↓</button>
+                    {p.kind === 'embed' && !canPauseEmbed(p.src) && (
+                      <button
+                        className={`icon-btn present-act ${p.stopOnLeave ? 'on' : ''}`}
+                        aria-pressed={!!p.stopOnLeave}
+                        title={p.stopOnLeave
+                          ? 'Sound stops when you switch away (the deck restarts from the beginning when you come back). Click to keep it loaded instead.'
+                          : 'Stop sound when switching away — use this if this deck has a video or audio, so it doesn’t keep playing behind other presentations. The deck will restart from the beginning when you come back.'}
+                        onClick={() => store.update(p.id, { stopOnLeave: !p.stopOnLeave })}
+                      >{p.stopOnLeave ? '🔇' : '🔊'}</button>
+                    )}
                     <button className="icon-btn present-act" title="Present from here" disabled={!fullscreen.supported} onClick={() => presentFrom(p.id)}>▶</button>
                     <button className="icon-btn present-act" title="Remove" onClick={() => removeItem(p)}>×</button>
                   </div>
@@ -399,9 +456,21 @@ function pauseEmbed(frame: HTMLIFrameElement, src: string) {
   else if (src.includes('player.vimeo.com')) w.postMessage(JSON.stringify({ method: 'pause' }), '*');
 }
 
+/** Only one sound at a time: when any video/audio in the stage starts, pause the rest. */
+function pauseOtherMedia(playing: HTMLMediaElement) {
+  document.querySelectorAll<HTMLMediaElement>('.stage video, .stage audio').forEach((m) => {
+    if (m !== playing && !m.paused) m.pause();
+  });
+}
+
+/** True for embeds we can pause ourselves (YouTube/Vimeo players). */
+export const canPauseEmbed = (src: string) => src.includes('youtube.com/embed') || src.includes('player.vimeo.com');
+
 function Frame({ p, src, active }: { p: Presentation; src?: string; active: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRef = useRef<HTMLMediaElement>(null);
+  // "Stop sound when switching away": unload the page while it's not on screen.
+  const unloaded = !active && !!p.stopOnLeave;
 
   useEffect(() => {
     if (active) {
@@ -409,21 +478,37 @@ function Frame({ p, src, active }: { p: Presentation; src?: string; active: bool
       const t = window.setTimeout(() => iframeRef.current?.focus(), 50);
       return () => window.clearTimeout(t);
     }
-    videoRef.current?.pause();
+    mediaRef.current?.pause();
     if (iframeRef.current && src) pauseEmbed(iframeRef.current, src);
   }, [active, src]);
+
+  const mediaProps = {
+    src,
+    controls: true,
+    preload: 'auto' as const,
+    onPlay: (e: React.SyntheticEvent<HTMLMediaElement>) => pauseOtherMedia(e.currentTarget),
+  };
 
   let body;
   if (p.kind === 'poll' && p.poll) body = <PollStage poll={p.poll} fallbackQuestion={p.name} />;
   else if (!src) body = <div className="stage-empty">{p.kind === 'embed' ? 'No link' : 'Loading file… (if this stays, upload the file again)'}</div>;
   else if (p.kind === 'image') body = <img src={src} alt={p.name} />;
-  else if (p.kind === 'video') body = <video ref={videoRef} src={src} controls playsInline />;
+  else if (p.kind === 'video') body = <video ref={mediaRef as React.RefObject<HTMLVideoElement>} {...mediaProps} playsInline />;
+  else if (p.kind === 'audio') {
+    body = (
+      <div className="audio-stage">
+        <div className="audio-art" aria-hidden>♪</div>
+        <h2 className="audio-title">{p.name}</h2>
+        <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} {...mediaProps} />
+      </div>
+    );
+  }
   else {
     body = (
       <iframe
         ref={iframeRef}
         title={p.name}
-        src={p.kind === 'pdf' && !src.includes('#') ? `${src}#view=Fit&toolbar=0&navpanes=0` : src}
+        src={unloaded ? 'about:blank' : p.kind === 'pdf' && !src.includes('#') ? `${src}#view=Fit&toolbar=0&navpanes=0` : src}
         // No allowfullscreen on purpose: if an embed took fullscreen for itself,
         // our switcher bar would be hidden and switching would drop you out.
         allow="autoplay; encrypted-media; picture-in-picture; clipboard-write"

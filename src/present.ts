@@ -3,7 +3,7 @@
  * embeddable URLs and classify uploaded files. No DOM, so they're unit tested.
  */
 
-export type MediaKind = 'embed' | 'pdf' | 'image' | 'video' | 'poll';
+export type MediaKind = 'embed' | 'pdf' | 'image' | 'video' | 'audio' | 'poll';
 
 export type Presentation = {
   id: string;
@@ -18,6 +18,12 @@ export type Presentation = {
   /** For uploaded files: the server file id (the URL is in `src`) and size in bytes. */
   fileId?: string;
   size?: number;
+  /**
+   * For linked presentations we can't pause from outside (e.g. a Google Slides deck
+   * with a video): unload it when switching away so its sound stops. It restarts
+   * from the beginning when you come back.
+   */
+  stopOnLeave?: boolean;
   /** For live polls: the join code and the presenter's secret key (kept only in this browser). */
   poll?: { code: string; hostKey: string };
 };
@@ -100,11 +106,12 @@ export function fileKind(name: string, mime: string): { kind: MediaKind; source:
   const ext = name.toLowerCase().split('.').pop() ?? '';
   if (mime === 'application/pdf' || ext === 'pdf') return { kind: 'pdf', source: 'PDF' };
   if (mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'].includes(ext)) return { kind: 'image', source: 'Image' };
+  if (mime.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'opus', 'weba'].includes(ext)) return { kind: 'audio', source: 'Audio' };
   if (mime.startsWith('video/') || ['mp4', 'webm', 'mov', 'm4v', 'ogv'].includes(ext)) return { kind: 'video', source: 'Video' };
   if (['ppt', 'pptx', 'key', 'odp'].includes(ext)) {
     return { error: `${name}: browsers can’t open ${ext.toUpperCase()} files directly. Export it as PDF (File → Export / Save as PDF) and upload that, or paste an embed link.` };
   }
-  return { error: `${name}: unsupported file type. Use PDF, an image, or a video.` };
+  return { error: `${name}: unsupported file type. Use PDF, an image, a video or an audio file.` };
 }
 
 /** Strips the extension for a friendlier default name. */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { getPoll, participantId, sendAnswer, type PollInfo } from './api';
+import { getPoll, participantId, sendAnswer, sendVote, type PollInfo } from './api';
 
 const MAX = 40;
 
@@ -27,6 +27,15 @@ export default function Audience({ code: initialCode }: { code?: string }) {
     setLoadErr(undefined);
     getPoll(code).then((p) => { setPoll(p); document.title = p.question; }).catch((e) => setLoadErr((e as Error).message));
   }, [code]);
+
+  // Multiple choice: check now and then so people see when voting closes or the answer is revealed.
+  useEffect(() => {
+    if (!code || poll?.type !== 'choice') return;
+    const t = window.setInterval(() => {
+      if (document.visibilityState === 'visible') getPoll(code).then(setPoll).catch(() => { /* keep showing what we have */ });
+    }, 6000);
+    return () => window.clearInterval(t);
+  }, [code, poll?.type]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -76,6 +85,8 @@ export default function Audience({ code: initialCode }: { code?: string }) {
 
   if (!poll) return <main className="aud"><div className="aud-card"><p className="muted">Loading…</p></div></main>;
 
+  if (poll.type === 'choice' && poll.options) return <ChoiceAnswer poll={poll} onPoll={setPoll} />;
+
   const done = left === 0;
   return (
     <main className="aud">
@@ -115,6 +126,66 @@ export default function Audience({ code: initialCode }: { code?: string }) {
           </div>
         )}
       </form>
+    </main>
+  );
+}
+
+/** Multiple choice: tap an option to vote; tap another to change your vote while voting is open. */
+function ChoiceAnswer({ poll, onPoll }: { poll: PollInfo; onPoll: (p: PollInfo) => void }) {
+  const storeKey = `poll-vote-${poll.code}`;
+  const [mine, setMine] = useState<number | undefined>(() => {
+    try { const v = localStorage.getItem(storeKey); return v == null ? undefined : Number(v); } catch { return undefined; }
+  });
+  const [sending, setSending] = useState<number>();
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string }>();
+  const options = poll.options ?? [];
+
+  const vote = async (i: number) => {
+    if (!poll.open || sending !== undefined || i === mine) return;
+    setSending(i); setMsg(undefined);
+    try {
+      const r = await sendVote(poll.code, participantId(), i);
+      setMine(i);
+      try { localStorage.setItem(storeKey, String(i)); } catch { /* private mode */ }
+      setMsg({ kind: 'ok', text: r.changed ? 'Vote changed. Look at the screen for the results.' : 'Vote sent! Look at the screen for the results.' });
+    } catch (err) {
+      const m = (err as Error).message;
+      setMsg({ kind: 'err', text: m });
+      if (/closed/i.test(m)) onPoll({ ...poll, open: false });
+    } finally {
+      setSending(undefined);
+    }
+  };
+
+  const revealed = poll.revealed && poll.correct != null;
+  return (
+    <main className="aud">
+      <div className="aud-card">
+        <div className="aud-kicker">{poll.hasCorrect ? 'Quiz' : 'Live poll'}</div>
+        <h1 className="aud-q">{poll.question}</h1>
+        <div className="aud-opts" role="radiogroup" aria-label="Options">
+          {options.map((o, i) => (
+            <button
+              key={i}
+              role="radio"
+              aria-checked={mine === i}
+              className={`aud-opt ${mine === i ? 'sel' : ''} ${revealed && poll.correct === i ? 'right' : ''}`}
+              disabled={!poll.open || sending !== undefined}
+              onClick={() => vote(i)}
+            >
+              <span className="opt-letter">{revealed && poll.correct === i ? '✓' : String.fromCharCode(65 + i)}</span>
+              <span className="grow">{o}</span>
+              {sending === i && <span className="muted small">Sending…</span>}
+            </button>
+          ))}
+        </div>
+        {revealed && mine !== undefined && (
+          <p className={`aud-msg ${mine === poll.correct ? 'ok' : 'err'}`}>{mine === poll.correct ? 'Correct! 🎉' : `The answer is ${String.fromCharCode(65 + (poll.correct ?? 0))}: ${options[poll.correct ?? 0]}.`}</p>
+        )}
+        {!poll.open && !revealed && <p className="aud-msg">Voting is closed. Look at the screen for the results.</p>}
+        {msg && poll.open && !revealed && <p className={`aud-msg ${msg.kind}`} role="status">{msg.text}</p>}
+        {poll.open && mine !== undefined && !msg && <p className="muted small">You voted {String.fromCharCode(65 + mine)}. Tap another option to change your vote.</p>}
+      </div>
     </main>
   );
 }

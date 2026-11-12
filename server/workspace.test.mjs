@@ -15,16 +15,23 @@ describe('workspace helpers', () => {
     expect(parseRange(undefined, 1000)).toBeNull();
     expect(parseRange('items=1-2', 1000)).toBeNull();
   });
-  it('accepts only PDF, image and video types', () => {
+  it('accepts only PDF, image, video and audio types', () => {
     expect(fileType('application/pdf', 'x')).toBe('application/pdf');
     expect(fileType('', 'Deck.PDF')).toBe('application/pdf');
     expect(fileType('application/octet-stream', 'clip.mov')).toBe('video/quicktime');
     expect(fileType('text/html', 'evil.html')).toBeNull();
     expect(fileType('', 'deck.pptx')).toBeNull();
+    expect(fileType('audio/mpeg', 'song.mp3')).toBe('audio/mpeg');
+    expect(fileType('audio/x-wav', 'a.wav')).toBe('audio/wav');
+    expect(fileType('audio/x-m4a', 'a.m4a')).toBe('audio/mp4');
+    expect(fileType('', 'Speech.M4A')).toBe('audio/mp4');
+    expect(fileType('', 'jingle.ogg')).toBe('audio/ogg');
+    expect(fileType('', 'clip.ogv')).toBe('video/ogg');
+    expect(fileType('image/jpg', 'x.jpg')).toBe('image/jpeg');
   });
   it('keeps only known item fields', () => {
-    const out = sanitizeItems([{ id: 'a', name: 'N', kind: 'pdf', src: '/files/x/y.pdf', source: 'PDF', fileId: 'y.pdf', evil: 'x', poll: { code: 'ABCDE', hostKey: 'k', extra: 1 } }, null, { name: 'no id' }]);
-    expect(out).toEqual([{ id: 'a', name: 'N', kind: 'pdf', src: '/files/x/y.pdf', source: 'PDF', fileId: 'y.pdf', poll: { code: 'ABCDE', hostKey: 'k' } }]);
+    const out = sanitizeItems([{ id: 'a', name: 'N', kind: 'pdf', src: '/files/x/y.pdf', source: 'PDF', fileId: 'y.pdf', evil: 'x', stopOnLeave: true, poll: { code: 'ABCDE', hostKey: 'k', extra: 1 } }, null, { name: 'no id' }]);
+    expect(out).toEqual([{ id: 'a', name: 'N', kind: 'pdf', src: '/files/x/y.pdf', source: 'PDF', fileId: 'y.pdf', stopOnLeave: true, poll: { code: 'ABCDE', hostKey: 'k' } }]);
     expect(sanitizeItems('nope')).toBeNull();
   });
 });

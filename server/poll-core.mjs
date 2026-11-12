@@ -3,6 +3,9 @@
 export const LIMITS = {
   questionMax: 200,
   answerMax: 40,
+  optionMax: 80,
+  optionsMin: 2,
+  optionsMax: 8,
   perPersonMax: 10,
   answersPerPoll: 20000,
   bodyBytes: 4096,
@@ -38,12 +41,51 @@ export function wordKey(text) {
     .trim();
 }
 
+/** Poll type: 'cloud' (word cloud, free text) or 'choice' (multiple choice, one vote each). */
+export const pollType = (poll) => (poll.type === 'choice' ? 'choice' : 'cloud');
+
 export function validateNewPoll(body) {
   const question = cleanText(body?.question, LIMITS.questionMax);
   if (!question) return { error: 'Please enter a question.' };
+  if (body?.type === 'choice') {
+    if (!Array.isArray(body.options)) return { error: 'Add the answer options.' };
+    const options = body.options.map((o) => cleanText(o, LIMITS.optionMax)).filter(Boolean);
+    if (options.length < LIMITS.optionsMin) return { error: `Add at least ${LIMITS.optionsMin} options.` };
+    if (options.length > LIMITS.optionsMax) return { error: `Use at most ${LIMITS.optionsMax} options.` };
+    if (new Set(options.map(wordKey)).size !== options.length) return { error: 'Two options are the same.' };
+    // The index refers to the submitted list; recompute it after empties were dropped.
+    let correct = null;
+    if (Number.isInteger(body.correct) && body.correct >= 0 && body.correct < body.options.length) {
+      const label = cleanText(body.options[body.correct], LIMITS.optionMax);
+      const i = options.indexOf(label);
+      if (label && i >= 0) correct = i;
+    }
+    return { type: 'choice', question, options, correct, perPerson: 1 };
+  }
   let perPerson = Number(body?.perPerson ?? 3);
   if (!Number.isInteger(perPerson) || perPerson < 1 || perPerson > LIMITS.perPersonMax) perPerson = 3;
-  return { question, perPerson };
+  return { type: 'cloud', question, perPerson };
+}
+
+/**
+ * Checks a multiple-choice vote. People may change their vote while voting is open.
+ * @returns {{ choice: number, previous: number } | { error: string }} previous = index of the vote it replaces, or -1
+ */
+export function checkVote(poll, pid, rawChoice) {
+  if (!poll.open) return { error: 'Voting is closed.' };
+  if (typeof pid !== 'string' || !/^[\w-]{8,64}$/.test(pid)) return { error: 'Invalid participant.' };
+  const choice = Number(rawChoice);
+  if (!Number.isInteger(choice) || choice < 0 || choice >= poll.options.length) return { error: 'Please choose one of the options.' };
+  const previous = poll.answers.findIndex((a) => a.pid === pid);
+  if (previous < 0 && poll.answers.length >= LIMITS.answersPerPoll) return { error: 'This poll is full.' };
+  return { choice, previous };
+}
+
+/** Votes per option. */
+export function tally(poll) {
+  const counts = poll.options.map(() => 0);
+  for (const a of poll.answers) if (a.choice >= 0 && a.choice < counts.length) counts[a.choice]++;
+  return counts;
 }
 
 /**
@@ -82,22 +124,31 @@ export function aggregate(answers, hidden = []) {
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
 
+/** The correct option is only shared once the presenter reveals it. */
+const answerKey = (poll) => (pollType(poll) === 'choice'
+  ? { hasCorrect: poll.correct != null, revealed: !!poll.revealed, ...(poll.revealed && poll.correct != null ? { correct: poll.correct } : {}) }
+  : {});
+
 /** What the presenter screen gets. */
 export function results(poll) {
-  return {
+  const base = {
     code: poll.code,
+    type: pollType(poll),
     question: poll.question,
     open: poll.open,
     perPerson: poll.perPerson,
     total: poll.answers.length,
     participants: new Set(poll.answers.map((a) => a.pid)).size,
-    words: aggregate(poll.answers, poll.hidden),
-    hidden: poll.hidden.length,
   };
+  if (base.type === 'choice') return { ...base, options: poll.options, counts: tally(poll), ...answerKey(poll), words: [], hidden: 0 };
+  return { ...base, words: aggregate(poll.answers, poll.hidden), hidden: poll.hidden.length };
 }
 
 /** What the audience page gets (no answers). */
-export const publicInfo = (poll) => ({ code: poll.code, question: poll.question, open: poll.open, perPerson: poll.perPerson });
+export const publicInfo = (poll) => ({
+  code: poll.code, type: pollType(poll), question: poll.question, open: poll.open, perPerson: poll.perPerson,
+  ...(pollType(poll) === 'choice' ? { options: poll.options, ...answerKey(poll) } : {}),
+});
 
 /** Fixed-window rate limiter keyed by e.g. IP. */
 export function rateLimiter({ max, windowMs, now = Date.now }) {

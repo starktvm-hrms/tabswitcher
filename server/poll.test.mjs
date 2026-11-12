@@ -151,3 +151,64 @@ describe('poll server (HTTP)', () => {
     expect((await req('/api/nothing')).status).toBe(404);
   });
 });
+
+describe('multiple-choice polls', () => {
+  it('validates options and the correct answer', async () => {
+    const { validateNewPoll } = await import('./poll-core.mjs');
+    expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['A'] })).toHaveProperty('error');
+    expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['Yes', 'yes!'] })).toHaveProperty('error', 'Two options are the same.');
+    expect(validateNewPoll({ type: 'choice', question: 'Q?', options: Array.from({ length: 9 }, (_, i) => `O${i}`) })).toHaveProperty('error');
+    // Empty options are dropped and the correct index follows its label.
+    expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['A', '', 'C', 'D'], correct: 2 }))
+      .toEqual({ type: 'choice', question: 'Q?', options: ['A', 'C', 'D'], correct: 1, perPerson: 1 });
+    expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['A', 'B'], correct: 7 }).correct).toBeNull();
+  });
+
+  let srv, base;
+  beforeAll(async () => {
+    srv = await createPollServer({ log: () => {} });
+    await new Promise((r) => srv.server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${srv.server.address().port}`;
+  });
+  afterAll(async () => { srv.server.closeAllConnections?.(); await new Promise((r) => srv.server.close(r)); });
+  const req = (p, opts = {}) => fetch(base + p, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers ?? {}) } })
+    .then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  it('counts one changeable vote per person and hides the answer until revealed', async () => {
+    const { body: created } = await req('/api/polls', { method: 'POST', body: JSON.stringify({ type: 'choice', question: 'Capital of India?', options: ['Mumbai', 'New Delhi', 'Kolkata'], correct: 1 }) });
+    const { code, hostKey } = created;
+    const info = (await req(`/api/polls/${code}`)).body;
+    expect(info).toMatchObject({ type: 'choice', options: ['Mumbai', 'New Delhi', 'Kolkata'], hasCorrect: true, revealed: false });
+    expect(info).not.toHaveProperty('correct');
+
+    const vote = (pid, choice) => req(`/api/polls/${code}/answers`, { method: 'POST', body: JSON.stringify({ pid, choice }) });
+    expect((await vote('person-aaaa', 1)).body).toEqual({ ok: true, choice: 1, changed: false });
+    await vote('person-bbbb', 0);
+    await vote('person-cccc', 1);
+    expect((await vote('person-bbbb', 1)).body.changed).toBe(true); // changed mind
+    expect((await vote('person-dddd', 5)).status).toBe(400);
+    expect((await vote('person-dddd', 'x')).status).toBe(400);
+
+    let r = (await req(`/api/polls/${code}/results`)).body;
+    expect(r).toMatchObject({ type: 'choice', counts: [0, 3, 0], total: 3, participants: 3, hasCorrect: true, revealed: false });
+    expect(r).not.toHaveProperty('correct');
+
+    // Only the presenter can reveal.
+    expect((await req(`/api/polls/${code}`, { method: 'PATCH', body: JSON.stringify({ revealed: true }) })).status).toBe(403);
+    r = (await req(`/api/polls/${code}`, { method: 'PATCH', headers: { 'X-Host-Key': hostKey }, body: JSON.stringify({ revealed: true }) })).body;
+    expect(r).toMatchObject({ revealed: true, correct: 1 });
+    expect((await req(`/api/polls/${code}`)).body.correct).toBe(1);
+
+    // Closed: votes refused. Clear resets counts.
+    await req(`/api/polls/${code}`, { method: 'PATCH', headers: { 'X-Host-Key': hostKey }, body: JSON.stringify({ open: false }) });
+    expect((await vote('person-eeee', 0)).status).toBe(409);
+    r = (await req(`/api/polls/${code}/clear`, { method: 'POST', headers: { 'X-Host-Key': hostKey } })).body;
+    expect(r.counts).toEqual([0, 0, 0]);
+  });
+
+  it('keeps old polls (no type) working as word clouds', async () => {
+    const { body } = await req('/api/polls', { method: 'POST', body: JSON.stringify({ question: 'Words?' }) });
+    expect(body.type).toBe('cloud');
+    expect((await req(`/api/polls/${body.code}/answers`, { method: 'POST', body: JSON.stringify({ pid: 'person-zzzz', text: 'Hi' }) })).status).toBe(201);
+  });
+});

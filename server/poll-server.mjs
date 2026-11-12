@@ -5,11 +5,11 @@
 //
 // Public:   POST /api/polls                      create  → { code, hostKey }
 //           GET  /api/polls/:code                 audience info
-//           POST /api/polls/:code/answers         { pid, text }
+//           POST /api/polls/:code/answers         { pid, text } (word cloud) or { pid, choice } (multiple choice)
 //           GET  /api/polls/:code/results         word-cloud data
 //           GET  /api/polls/:code/stream          Server-Sent Events with live results
 // Host only (header X-Host-Key):
-//           PATCH  /api/polls/:code               { open?, question?, perPerson? }
+//           PATCH  /api/polls/:code               { open?, question?, perPerson?, revealed? }
 //           POST   /api/polls/:code/hide          { key }   hide a word from the cloud
 //           POST   /api/polls/:code/unhide        show all hidden words again
 //           POST   /api/polls/:code/clear         delete all answers
@@ -21,7 +21,7 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/pro
 import path from 'node:path';
 import { createWorkspaces } from './workspace.mjs';
 import {
-  LIMITS, checkAnswer, cleanText, isCode, makeCode, publicInfo, rateLimiter, results, validateNewPoll, wordKey,
+  LIMITS, checkAnswer, checkVote, cleanText, pollType, isCode, makeCode, publicInfo, rateLimiter, results, validateNewPoll, wordKey,
 } from './poll-core.mjs';
 
 const MAX_POLLS = 2000;
@@ -156,7 +156,11 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
       let code;
       do code = makeCode(5); while (polls.has(code));
       const hostKey = randomBytes(24).toString('base64url');
-      const poll = { code, question: v.question, perPerson: v.perPerson, open: true, hostHash: hash(hostKey).toString('base64'), createdAt: Date.now(), answers: [], hidden: [] };
+      const poll = {
+        code, type: v.type, question: v.question, perPerson: v.perPerson, open: true,
+        ...(v.type === 'choice' ? { options: v.options, correct: v.correct, revealed: false } : {}),
+        hostHash: hash(hostKey).toString('base64'), createdAt: Date.now(), answers: [], hidden: [],
+      };
       polls.set(code, poll);
       save(poll);
       log(`poll ${code} created`);
@@ -187,6 +191,15 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     if (action === 'answers' && req.method === 'POST') {
       if (!allowAnswer(ip)) return json(res, 429, { error: 'Too many answers from this network. Please wait a moment.' });
       const body = await readBody(req);
+      if (pollType(poll) === 'choice') {
+        const v = checkVote(poll, body.pid, body.choice);
+        if (v.error) return json(res, v.error === 'Voting is closed.' ? 409 : 400, v);
+        const vote = { pid: body.pid, choice: v.choice, at: Date.now() };
+        if (v.previous >= 0) poll.answers[v.previous] = vote; else poll.answers.push(vote);
+        save(poll);
+        push(code);
+        return json(res, 201, { ok: true, choice: v.choice, changed: v.previous >= 0 });
+      }
       const r = checkAnswer(poll, body.pid, body.text);
       if (r.error) return json(res, r.error === 'Voting is closed.' ? 409 : 400, r);
       poll.answers.push({ pid: body.pid, text: r.text, at: Date.now() });
@@ -201,12 +214,13 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     if (!action && req.method === 'PATCH') {
       const body = await readBody(req);
       if (typeof body.open === 'boolean') poll.open = body.open;
+      if (typeof body.revealed === 'boolean' && pollType(poll) === 'choice') poll.revealed = body.revealed;
       if (body.question !== undefined) {
         const q = cleanText(body.question, LIMITS.questionMax);
         if (!q) return json(res, 400, { error: 'Please enter a question.' });
         poll.question = q;
       }
-      if (body.perPerson !== undefined) {
+      if (body.perPerson !== undefined && pollType(poll) === 'cloud') {
         const n = Number(body.perPerson);
         if (Number.isInteger(n) && n >= 1 && n <= LIMITS.perPersonMax) poll.perPerson = n;
       }

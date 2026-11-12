@@ -45,10 +45,12 @@ describe('toEmbed', () => {
 });
 
 describe('fileKind', () => {
-  it('accepts PDFs, images and videos by type or extension', () => {
+  it('accepts PDFs, images, videos and audio by type or extension', () => {
     expect(fileKind('deck.pdf', '')).toEqual({ kind: 'pdf', source: 'PDF' });
     expect(fileKind('cover.PNG', 'image/png')).toEqual({ kind: 'image', source: 'Image' });
     expect(fileKind('reel.mov', '')).toEqual({ kind: 'video', source: 'Video' });
+    expect(fileKind('intro.mp3', 'audio/mpeg')).toEqual({ kind: 'audio', source: 'Audio' });
+    expect(fileKind('speech.m4a', '')).toEqual({ kind: 'audio', source: 'Audio' });
   });
   it('explains how to handle PowerPoint/Keynote files', () => {
     const r = fileKind('Pitch.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');

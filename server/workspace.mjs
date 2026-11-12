@@ -25,12 +25,21 @@ export const WS_LIMITS = {
   workspaces: 5000,
 };
 
-const TYPES = {
-  'application/pdf': 'pdf',
-  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/avif': 'avif',
-  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/ogg': 'ogv', 'video/x-m4v': 'm4v',
+/** Allowed upload types: file extension → canonical MIME type. */
+const EXT_MIME = {
+  pdf: 'application/pdf',
+  png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', avif: 'image/avif',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogv: 'video/ogg', m4v: 'video/x-m4v',
+  mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg',
+  flac: 'audio/flac', opus: 'audio/opus', weba: 'audio/webm',
 };
-const MIME_BY_EXT = Object.fromEntries(Object.entries(TYPES).map(([m, e]) => [e, m]));
+/** MIME types browsers report → extension (canonical ones first, then common aliases). */
+const TYPES = {
+  ...Object.fromEntries(Object.entries(EXT_MIME).reverse().map(([e, m]) => [m, e])),
+  'image/jpg': 'jpg', 'audio/mp3': 'mp3', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/vnd.wave': 'wav',
+  'audio/x-m4a': 'm4a', 'audio/x-aac': 'aac', 'audio/x-flac': 'flac',
+};
+const MIME_BY_EXT = EXT_MIME;
 
 export const isWsId = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{10,32}$/.test(s);
 const isFileId = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{16,40}\.[a-z0-9]{2,5}$/.test(s);
@@ -38,10 +47,10 @@ const hash = (k) => createHash('sha256').update(k).digest();
 
 /** Guesses a file's MIME type from what the browser said or its name; null if unsupported. */
 export function fileType(mime, name) {
-  if (mime && TYPES[mime]) return mime;
+  if (mime && TYPES[mime]) return EXT_MIME[TYPES[mime]];
   const ext = String(name ?? '').toLowerCase().split('.').pop();
-  const alias = { jpeg: 'jpg', m4v: 'm4v', ogg: 'ogv' }[ext] ?? ext;
-  return MIME_BY_EXT[alias] ?? null;
+  const alias = { jpeg: 'jpg' }[ext] ?? ext;
+  return EXT_MIME[alias] ?? null;
 }
 
 /** Keeps only the fields the app uses, so the stored JSON can't grow arbitrary data. */
@@ -57,6 +66,7 @@ export function sanitizeItems(items) {
     if (it.original) out.original = str(it.original, 4000);
     if (it.fileId) out.fileId = str(it.fileId, 64);
     if (it.size) out.size = Number(it.size) || 0;
+    if (it.stopOnLeave === true) out.stopOnLeave = true;
     if (it.poll && typeof it.poll === 'object') out.poll = { code: str(it.poll.code, 8) ?? '', hostKey: str(it.poll.hostKey, 64) ?? '' };
     return out;
   }).filter(Boolean);
@@ -131,7 +141,7 @@ export async function createWorkspaces({ dataDir, json, readJson, log }) {
 
   async function upload(req, res, w, url) {
     const type = fileType(String(req.headers['content-type'] ?? '').split(';')[0], url.searchParams.get('name'));
-    if (!type) return json(res, 415, { error: 'Only PDF, image and video files can be uploaded.' });
+    if (!type) return json(res, 415, { error: 'Only PDF, image, video and audio files can be uploaded.' });
     const declared = Number(req.headers['content-length'] ?? 0);
     if (declared > WS_LIMITS.fileBytes) return json(res, 413, { error: `Files can be up to ${WS_LIMITS.fileBytes / 1024 / 1024} MB.` });
     if (usage(w) + declared > WS_LIMITS.quotaBytes) return json(res, 413, { error: 'This workspace is full. Remove some files first.' });

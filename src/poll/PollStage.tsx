@@ -1,16 +1,21 @@
 import { useState } from 'react';
 import { hostApi, joinUrl, useLiveResults, type HostPoll } from './api';
+import { BarChart } from './BarChart';
 import { Qr } from './Qr';
 import { WordCloud } from './WordCloud';
 
 /**
  * The poll as it appears on the presentation screen: question, QR code to join,
- * and the live word cloud. Presenter controls sit in a small bar at the bottom.
+ * and the live results: a word cloud, or bars for a multiple-choice question.
+ * Presenter controls sit in a small bar at the bottom.
  */
 export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallbackQuestion: string }) {
   const live = useLiveResults(poll.code);
   const r = live.results;
   const [showQr, setShowQr] = useState(true);
+  // Multiple choice: the presenter can keep the bars hidden while people vote.
+  const [hideResults, setHideResults] = useState(false);
+  const isChoice = r?.type === 'choice';
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string>();
   // Confirmations are drawn inside the stage: a browser confirm() dialog would end fullscreen.
@@ -35,11 +40,15 @@ export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallback
       </header>
 
       <div className="poll-body">
-        <WordCloud
-          words={r?.words ?? []}
-          emptyText={r ? (r.open ? (showQr ? 'Scan the QR code and send your answer' : 'Waiting for answers…') : 'Voting is closed') : 'Connecting…'}
-          onWordClick={(w) => setAsk({ text: `Hide “${w.text}” from the word cloud?`, yes: 'Hide', run: () => api.hide(w.key) })}
-        />
+        {isChoice && r?.options ? (
+          <BarChart options={r.options} counts={r.counts ?? []} correct={r.revealed ? r.correct : undefined} hidden={hideResults} />
+        ) : (
+          <WordCloud
+            words={r?.words ?? []}
+            emptyText={r ? (r.open ? (showQr ? 'Scan the QR code and send your answer' : 'Waiting for answers…') : 'Voting is closed') : 'Connecting…'}
+            onWordClick={(w) => setAsk({ text: `Hide “${w.text}” from the word cloud?`, yes: 'Hide', run: () => api.hide(w.key) })}
+          />
+        )}
         {showQr && (
           <aside className="poll-join">
             <Qr text={url} label={`QR code to join the poll at ${prettyUrl}`} />
@@ -62,7 +71,9 @@ export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallback
       <footer className="poll-foot">
         <span className={`poll-status ${r?.open ? 'open' : 'closed'}`}>{r ? (r.open ? '● Voting open' : '■ Voting closed') : '…'}</span>
         <span className="poll-count">
-          {r ? `${r.total} ${r.total === 1 ? 'answer' : 'answers'} · ${r.participants} ${r.participants === 1 ? 'person' : 'people'}` : ''}
+          {r ? (isChoice
+            ? `${r.total} ${r.total === 1 ? 'vote' : 'votes'}`
+            : `${r.total} ${r.total === 1 ? 'answer' : 'answers'} · ${r.participants} ${r.participants === 1 ? 'person' : 'people'}`) : ''}
         </span>
         {!live.connected && r && <span className="poll-warn">Reconnecting…</span>}
         {(err || live.error) && <span className="poll-warn">{err ?? live.error}</span>}
@@ -74,9 +85,17 @@ export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallback
               {r.open ? 'Close voting' : 'Reopen voting'}
             </button>
           )}
+          {isChoice && (
+            <button className="poll-btn" onClick={() => setHideResults((h) => !h)}>{hideResults ? 'Show results' : 'Hide results'}</button>
+          )}
+          {isChoice && r?.hasCorrect && (
+            <button className="poll-btn" disabled={busy} onClick={() => { setHideResults(false); run(() => api.setRevealed(!r.revealed)); }}>
+              {r.revealed ? 'Hide answer' : 'Reveal answer'}
+            </button>
+          )}
           {!!r?.hidden && <button className="poll-btn" disabled={busy} onClick={() => run(api.unhide)}>Show {r.hidden} hidden</button>}
           {!!r?.total && (
-            <button className="poll-btn" disabled={busy} onClick={() => setAsk({ text: 'Delete all answers in this poll?', yes: 'Delete all', run: api.clear })}>Clear</button>
+            <button className="poll-btn" disabled={busy} onClick={() => setAsk({ text: isChoice ? 'Delete all votes in this poll?' : 'Delete all answers in this poll?', yes: 'Delete all', run: api.clear })}>Clear</button>
           )}
         </div>
       </footer>

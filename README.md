@@ -32,6 +32,22 @@ Limits:
 - Each workspace holds up to 5 GB.
 - Files you remove are deleted from the server.
 
+## Multiple-choice polls and quizzes
+
+1. Click **▤ Multiple-choice poll**, type the question and 2–8 options. Optionally tick **Correct** on one option to make it a quiz.
+2. People scan the QR code and tap an option. They can change their vote until voting closes.
+3. Bars on the screen grow live, showing each option's percentage and number of votes.
+4. Controls at the bottom of the poll screen:
+   - **Hide results** keeps the bars hidden while people vote.
+   - **Reveal answer** turns the correct option green, and each phone shows "Correct!" or the right answer.
+   - **Close voting** and **Clear** work as in the word cloud.
+
+## Audio and video
+
+- **Uploads:** you can upload video (MP4, WebM, MOV) and audio (MP3, WAV, M4A, AAC, OGG, FLAC) files and play them from the screen.
+- **One sound at a time:** starting any video or audio pauses the others, and switching to another presentation pauses what was playing. YouTube and Vimeo are paused automatically too.
+- **Linked decks with sound:** a Google Slides, Canva or other linked deck can't be paused from outside. If one has a video or audio in it, click **🔊** on its row to switch to **🔇 stop sound when switching away**. The deck is then unloaded while another presentation is on screen, and it restarts from the beginning when you come back.
+
 ## Live word-cloud polls
 
 Built for big rooms: it was load-tested with 1,000 people sending 3,000 answers within 10 seconds from one shared network, with no errors. Phones retry automatically if the venue Wi-Fi hiccups.
