@@ -18,7 +18,6 @@ export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallback
   const api = hostApi(poll);
   const url = joinUrl(poll.code);
   const prettyUrl = url.replace(/^https?:\/\//, '');
-  const joinBase = prettyUrl.replace(/\/[^/]*$/, ''); // e.g. seminar.starkpeople.in/p
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true); setErr(undefined);
@@ -33,23 +32,20 @@ export function PollStage({ poll, fallbackQuestion }: { poll: HostPoll; fallback
     <div className={`poll-stage ${showQr ? '' : 'no-qr'}`}>
       <header className="poll-head">
         <h2 className="poll-question">{r?.question ?? fallbackQuestion}</h2>
-        {!showQr && <div className="poll-join-inline">Join at <b>{joinBase}</b> · code <b>{poll.code}</b></div>}
       </header>
 
       <div className="poll-body">
         <WordCloud
           words={r?.words ?? []}
-          emptyText={r ? (r.open ? 'Scan the QR code and send your answer' : 'Voting is closed') : 'Connecting…'}
+          emptyText={r ? (r.open ? (showQr ? 'Scan the QR code and send your answer' : 'Waiting for answers…') : 'Voting is closed') : 'Connecting…'}
           onWordClick={(w) => setAsk({ text: `Hide “${w.text}” from the word cloud?`, yes: 'Hide', run: () => api.hide(w.key) })}
         />
         {showQr && (
           <aside className="poll-join">
             <Qr text={url} label={`QR code to join the poll at ${prettyUrl}`} />
             <div className="poll-join-text">
-              <span>Scan, or go to</span>
-              <b>{joinBase}</b>
-              <span>and enter the code</span>
-              <b className="poll-code">{poll.code}</b>
+              <b className="poll-scan">Scan to answer</b>
+              <span>with your phone camera</span>
             </div>
           </aside>
         )}

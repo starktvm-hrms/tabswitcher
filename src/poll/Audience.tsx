@@ -67,7 +67,7 @@ export default function Audience({ code: initialCode }: { code?: string }) {
       <main className="aud">
         <div className="aud-card">
           <h1 className="aud-q">Poll not found</h1>
-          <p className="muted">{loadErr}</p>
+          <p className="muted">This poll has ended or the link is incomplete. Please scan the QR code on the screen again.</p>
           <button className="aud-send" onClick={() => { history.replaceState(null, '', '/p'); setCode(undefined); }}>Enter a code</button>
         </div>
       </main>
@@ -80,7 +80,7 @@ export default function Audience({ code: initialCode }: { code?: string }) {
   return (
     <main className="aud">
       <form className="aud-card" onSubmit={submit}>
-        <div className="aud-kicker">Live poll · {poll.code}</div>
+        <div className="aud-kicker">Live poll</div>
         <h1 className="aud-q">{poll.question}</h1>
         {!poll.open ? (
           <p className="aud-msg">Voting is closed. Look at the screen for the results.</p>

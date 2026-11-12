@@ -40,7 +40,7 @@ Built for big rooms: it was load-tested with 1,000 people sending 3,000 answers 
 Ask the room a question and watch the answers appear as a word cloud, live.
 
 1. Click **☁ Word-cloud poll**, type the question, choose how many answers each person may send (1–5), and click **Create poll**. The poll becomes a tab in the playlist and in the fullscreen switcher bar, next to your decks.
-2. The poll screen shows the question, a **QR code** and the join link (`seminar.starkpeople.in/p/CODE`). People scan the code with their phone, type an answer and press **Send**.
+2. The poll screen shows the question and a big **QR code**: people scan it with their phone camera, type an answer and press **Send**. No app, code or sign-up needed.
 3. Answers appear in the cloud within a second. Common answers grow bigger, and spelling variants count as one word ("Inspiring", "inspiring!" and "INSPIRING").
 4. Presenter controls are at the bottom of the poll screen and work in fullscreen:
    - **Hide QR** gives the cloud more room.
