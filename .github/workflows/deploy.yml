@@ -1,0 +1,94 @@
+# Builds the app and deploys it to https://seminar.starkpeople.in on the Hostinger VPS.
+# Runs on every push to main, and on demand from the Actions tab (Run workflow).
+# One-time server setup and the required secrets: see deploy/README.md.
+name: Deploy to seminar.starkpeople.in
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-seminar
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://seminar.starkpeople.in
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check secrets are set
+        id: secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          missing=""
+          [ -n "$VPS_HOST" ] || missing="$missing VPS_HOST"
+          [ -n "$VPS_USER" ] || missing="$missing VPS_USER"
+          [ -n "$VPS_SSH_KEY" ] || missing="$missing VPS_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "::warning::Built and tested, but NOT deployed — missing repository secrets:$missing. Run deploy/setup-server.sh on the VPS and add the values it prints (see deploy/README.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$VPS_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_KNOWN_HOSTS is not set; trusting the host key on first use."
+            ssh-keyscan -H "$VPS_HOST" > ~/.ssh/known_hosts
+          fi
+
+      - name: Upload build
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          # --delay-updates swaps files in at the end, so visitors never see a half-copied site.
+          rsync -az --delete --delay-updates \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            dist/ "$VPS_USER@$VPS_HOST:/var/www/seminar.starkpeople.in/"
+
+      - name: Verify live site
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          sleep 2
+          for url in https://seminar.starkpeople.in/ http://seminar.starkpeople.in/; do
+            if curl -fsSL --max-time 15 "$url" | grep -q '<title>Seminar Presenter</title>'; then
+              echo "Live: $url"; exit 0
+            fi
+          done
+          echo "::error::Uploaded, but the site isn't serving the new build yet. Check nginx on the VPS (see deploy/README.md)."
+          exit 1
