@@ -2,16 +2,31 @@ import { useEffect, useState } from 'react';
 
 /** Client for the poll server (server/poll-server.mjs), served under /api on the same origin. */
 
-export type PollType = 'cloud' | 'choice';
+export type PollType = 'cloud' | 'choice' | 'rating' | 'open';
+/** What phones get: the quiz position and the current question. */
 export type PollInfo = {
-  code: string; type: PollType; question: string; open: boolean; perPerson: number;
+  code: string; title: string; current: number; count: number;
+  qid: string; type: PollType; question: string; open: boolean; perPerson: number;
   /** Multiple choice only. `correct` is present once the presenter reveals it. */
   options?: string[]; hasCorrect?: boolean; revealed?: boolean; correct?: number;
+  /** Rating only. */
+  lowLabel?: string; highLabel?: string; scale?: number;
 };
 export type CloudWord = { key: string; text: string; count: number };
-export type PollResults = PollInfo & { total: number; participants: number; words: CloudWord[]; hidden: number; counts?: number[] };
-export type NewPoll = { type: 'cloud'; question: string; perPerson: number } | { type: 'choice'; question: string; options: string[]; correct: number | null };
+export type PollResults = PollInfo & {
+  total: number; participants: number; words: CloudWord[]; hidden: number;
+  counts?: number[]; average?: number | null; responses?: { id: string; text: string }[];
+};
+/** One question as edited in the quiz editor (and returned by /admin). */
+export type QuestionDef = {
+  id?: string; type: PollType; question: string; perPerson?: number;
+  options?: string[]; correct?: number | null; lowLabel?: string; highLabel?: string; answers?: number;
+};
+export type QuizDef = { title: string; questions: QuestionDef[] };
+
 export type HostPoll = { code: string; hostKey: string };
+
+export const TYPE_LABEL: Record<PollType, string> = { cloud: 'Word cloud', choice: 'Multiple choice', rating: 'Rating 1–5', open: 'Open text' };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,16 +59,18 @@ async function call<T>(path: string, init: RequestInit & { hostKey?: string; ret
   }
 }
 
-export const createPoll = (poll: NewPoll) =>
-  call<PollInfo & { hostKey: string }>('/polls', { method: 'POST', retries: 0, body: JSON.stringify(poll) });
-export const getPoll = (code: string) => call<PollInfo>(`/polls/${encodeURIComponent(code)}`);
-export const sendAnswer = (code: string, pid: string, text: string) =>
-  call<{ ok: true; left: number }>(`/polls/${encodeURIComponent(code)}/answers`, { method: 'POST', body: JSON.stringify({ pid, text }) });
-export const sendVote = (code: string, pid: string, choice: number) =>
-  call<{ ok: true; choice: number; changed: boolean }>(`/polls/${encodeURIComponent(code)}/answers`, { method: 'POST', body: JSON.stringify({ pid, choice }) });
+export const createQuiz = (quiz: QuizDef) =>
+  call<PollInfo & { hostKey: string }>('/polls', { method: 'POST', retries: 0, body: JSON.stringify(quiz) });
+export const getPoll = (code: string) => call<PollInfo>(`/polls/${encodeURIComponent(code)}`, { retries: 2 });
+/** Sends an answer to question `qid`: text (word cloud / open), choice (multiple choice) or value (rating). */
+export const sendAnswer = (code: string, body: { pid: string; qid: string; text?: string; choice?: number; value?: number }) =>
+  call<{ ok: true; left?: number; changed?: boolean }>(`/polls/${encodeURIComponent(code)}/answers`, { method: 'POST', body: JSON.stringify(body) });
 
 export const hostApi = (p: HostPoll) => ({
   setOpen: (open: boolean) => call<PollResults>(`/polls/${p.code}`, { method: 'PATCH', hostKey: p.hostKey, body: JSON.stringify({ open }) }),
+  go: (current: number) => call<PollResults>(`/polls/${p.code}`, { method: 'PATCH', hostKey: p.hostKey, body: JSON.stringify({ current }) }),
+  admin: () => call<QuizDef & { code: string; current: number; count: number }>(`/polls/${p.code}/admin`, { hostKey: p.hostKey }),
+  edit: (quiz: QuizDef) => call<PollResults>(`/polls/${p.code}/questions`, { method: 'PUT', hostKey: p.hostKey, body: JSON.stringify(quiz) }),
   setRevealed: (revealed: boolean) => call<PollResults>(`/polls/${p.code}`, { method: 'PATCH', hostKey: p.hostKey, body: JSON.stringify({ revealed }) }),
   setQuestion: (question: string) => call<PollResults>(`/polls/${p.code}`, { method: 'PATCH', hostKey: p.hostKey, body: JSON.stringify({ question }) }),
   hide: (key: string) => call<PollResults>(`/polls/${p.code}/hide`, { method: 'POST', hostKey: p.hostKey, body: JSON.stringify({ key }) }),

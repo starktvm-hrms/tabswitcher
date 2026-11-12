@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState, type FormEvent, type R
 import { useFullscreen } from './useFullscreen';
 import { baseName, fileKind, move, toEmbed, type Presentation } from './present';
 import { usePresentations } from './presentStore';
-import { createPoll, hostApi, joinUrl } from './poll/api';
+import { createQuiz, hostApi, joinUrl, type QuizDef } from './poll/api';
+import { QuizEditor } from './poll/QuizEditor';
 import { PollStage } from './poll/PollStage';
 import { Qr } from './poll/Qr';
 import { parseShareLink, shareLink } from './workspace';
@@ -20,11 +21,8 @@ export default function Presenter() {
   const [link, setLink] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [pollForm, setPollForm] = useState<false | 'cloud' | 'choice'>(false);
-  const [pollOpts, setPollOpts] = useState<string[]>(['', '', '', '']);
-  const [pollCorrect, setPollCorrect] = useState<number | null>(null);
-  const [pollQ, setPollQ] = useState('');
-  const [pollPer, setPollPer] = useState(3);
+  // Quiz editor: closed, creating a new quiz, or editing the quiz of a playlist item.
+  const [quizEdit, setQuizEdit] = useState<false | { itemId?: string; initial?: QuizDef }>(false);
   const [pollBusy, setPollBusy] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -56,21 +54,24 @@ export default function Presenter() {
     setErrors(errs);
   };
 
-  const addPoll = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!pollQ.trim() || pollBusy) return;
+  const quizSource = (count: number) => (count === 1 ? 'Quiz · 1 question' : `Quiz · ${count} questions`);
+
+  /** Creates a new quiz, or saves edits to an existing one. */
+  const saveQuiz = async (quiz: QuizDef) => {
+    if (!quizEdit || pollBusy) return;
     setPollBusy(true);
     try {
-      const created = await createPoll(pollForm === 'choice'
-        ? { type: 'choice', question: pollQ, options: pollOpts, correct: pollCorrect }
-        : { type: 'cloud', question: pollQ, perPerson: pollPer });
-      const source = created.type === 'choice' ? (created.hasCorrect ? 'Quiz question' : 'Multiple-choice poll') : 'Word cloud poll';
-      const id = store.addLink({ name: created.question, kind: 'poll', src: '', source, poll: { code: created.code, hostKey: created.hostKey } });
-      setActiveId(id);
-      setPollQ('');
-      setPollOpts(['', '', '', '']);
-      setPollCorrect(null);
-      setPollForm(false);
+      const item = quizEdit.itemId ? items.find((p) => p.id === quizEdit.itemId) : undefined;
+      if (item?.poll) {
+        const r = await hostApi(item.poll).edit(quiz);
+        store.update(item.id, { name: r.title, source: quizSource(r.count) });
+        setActiveId(item.id);
+      } else {
+        const created = await createQuiz(quiz);
+        const id = store.addLink({ name: created.title, kind: 'poll', src: '', source: quizSource(created.count), poll: { code: created.code, hostKey: created.hostKey } });
+        setActiveId(id);
+      }
+      setQuizEdit(false);
       setErrors([]);
     } catch (err) {
       setErrors([(err as Error).message]);
@@ -79,8 +80,19 @@ export default function Presenter() {
     }
   };
 
+  const editQuiz = async (p: Presentation) => {
+    if (!p.poll) return;
+    try {
+      const def = await hostApi(p.poll).admin();
+      setQuizEdit({ itemId: p.id, initial: { title: def.title, questions: def.questions } });
+      setErrors([]);
+    } catch (err) {
+      setErrors([(err as Error).message]);
+    }
+  };
+
   const removeItem = (p: Presentation) => {
-    const msg = p.poll ? `Delete the poll “${p.name}” and all its answers?` : `Remove “${p.name}”?`;
+    const msg = p.poll ? `Delete the quiz “${p.name}” and all its answers?` : `Remove “${p.name}”?`;
     if (!window.confirm(msg)) return;
     if (p.poll) hostApi(p.poll).remove().catch(() => { /* already gone */ });
     store.remove(p.id);
@@ -97,7 +109,7 @@ export default function Presenter() {
         <div>
           <h1>Seminar Presenter</h1>
           <p className="muted">
-            Line up decks, PDFs, videos, audio and live polls (word cloud or multiple choice), then present them in one fullscreen window. Switch between them from the bar
+            Line up decks, PDFs, videos, audio and live quizzes (word cloud, multiple choice, rating, open questions), then present them in one fullscreen window. Switch between them from the bar
             at the bottom of the screen without leaving fullscreen.
           </p>
         </div>
@@ -139,68 +151,23 @@ export default function Presenter() {
               />
             </div>
             <div className="row gap wrap">
-              <button className={`btn ${pollForm === 'cloud' ? 'btn-on' : ''}`} onClick={() => setPollForm((v) => (v === 'cloud' ? false : 'cloud'))} aria-expanded={pollForm === 'cloud'}>☁ Word-cloud poll</button>
-              <button className={`btn ${pollForm === 'choice' ? 'btn-on' : ''}`} onClick={() => setPollForm((v) => (v === 'choice' ? false : 'choice'))} aria-expanded={pollForm === 'choice'}>▤ Multiple-choice poll</button>
+              <button className={`btn ${quizEdit && !quizEdit.itemId ? 'btn-on' : ''}`} onClick={() => setQuizEdit((v) => (v && !v.itemId ? false : {}))} aria-expanded={!!quizEdit && !quizEdit.itemId}>
+                ＋ Quiz / poll
+              </button>
+              <span className="muted small">Word cloud, multiple choice, rating and open questions — all behind one QR code.</span>
             </div>
-            <span className="muted small">PowerPoint/Keynote files: export as PDF first.</span>
-            {pollForm && (
-              <form className="poll-form" onSubmit={addPoll}>
-                <input
-                  value={pollQ}
-                  onChange={(e) => setPollQ(e.target.value)}
-                  maxLength={200}
-                  placeholder={pollForm === 'choice' ? 'Question, e.g. “Which topic should we cover next?”' : 'Question, e.g. “One word to describe today?”'}
-                  aria-label="Poll question"
-                  autoFocus
+            {quizEdit && (
+              <div className="quiz-panel">
+                <h3>{quizEdit.itemId ? 'Edit quiz' : 'New quiz / poll'}</h3>
+                <QuizEditor
+                  key={quizEdit.itemId ?? 'new'}
+                  initial={quizEdit.initial}
+                  busy={pollBusy}
+                  saveLabel={quizEdit.itemId ? 'Save changes' : 'Create'}
+                  onSave={saveQuiz}
+                  onCancel={() => setQuizEdit(false)}
                 />
-                {pollForm === 'choice' && (
-                  <div className="opt-list">
-                    {pollOpts.map((o, i) => (
-                      <div key={i} className="opt-row">
-                        <span className="opt-letter">{String.fromCharCode(65 + i)}</span>
-                        <input
-                          value={o}
-                          onChange={(e) => setPollOpts((list) => list.map((x, j) => (j === i ? e.target.value : x)))}
-                          maxLength={80}
-                          placeholder={`Option ${String.fromCharCode(65 + i)}`}
-                          aria-label={`Option ${String.fromCharCode(65 + i)}`}
-                        />
-                        <label className="opt-correct" title="Mark as the correct answer (optional — turns this into a quiz)">
-                          <input type="radio" name="poll-correct" checked={pollCorrect === i} onChange={() => setPollCorrect(i)} onClick={() => { if (pollCorrect === i) setPollCorrect(null); }} />
-                          <span>Correct</span>
-                        </label>
-                        <button
-                          type="button" className="icon-btn present-act" title="Remove option" disabled={pollOpts.length <= 2}
-                          onClick={() => {
-                            setPollOpts((list) => list.filter((_, j) => j !== i));
-                            setPollCorrect((c) => (c === i ? null : c != null && c > i ? c - 1 : c));
-                          }}
-                        >×</button>
-                      </div>
-                    ))}
-                    <div className="row gap">
-                      <button type="button" className="link-btn small" disabled={pollOpts.length >= 8} onClick={() => setPollOpts((l) => [...l, ''])}>+ Add option</button>
-                      <span className="muted small">2–8 options. Marking a correct answer is optional; you can reveal it on screen.</span>
-                    </div>
-                  </div>
-                )}
-                <div className="row gap wrap">
-                  {pollForm === 'cloud' && (
-                    <label className="row gap small muted">
-                      Answers per person
-                      <select value={pollPer} onChange={(e) => setPollPer(Number(e.target.value))} style={{ width: 'auto' }}>
-                        {[1, 2, 3, 4, 5].map((n) => <option key={n}>{n}</option>)}
-                      </select>
-                    </label>
-                  )}
-                  <span className="grow" />
-                  <button className="btn" type="button" onClick={() => setPollForm(false)}>Cancel</button>
-                  <button
-                    className="btn btn-primary" type="submit"
-                    disabled={!pollQ.trim() || pollBusy || (pollForm === 'choice' && pollOpts.filter((o) => o.trim()).length < 2)}
-                  >{pollBusy ? 'Creating…' : 'Create poll'}</button>
-                </div>
-              </form>
+              </div>
             )}
             {store.uploads.map((u) => (
               <div key={u.id} className="upload-row" role="status">
@@ -213,7 +180,7 @@ export default function Presenter() {
           </div>
 
           {items.length === 0 ? (
-            <div className="empty">No presentations yet. Add a link, upload a file or create a word-cloud poll to get started.</div>
+            <div className="empty">No presentations yet. Add a link, upload a file or create a quiz to get started.</div>
           ) : (
             <ol className="present-list">
               {items.map((p, i) => (
@@ -249,6 +216,7 @@ export default function Presenter() {
                         onClick={() => store.update(p.id, { stopOnLeave: !p.stopOnLeave })}
                       >{p.stopOnLeave ? '🔇' : '🔊'}</button>
                     )}
+                    {p.poll && <button className="icon-btn present-act" title="Edit questions" onClick={() => editQuiz(p)}>✎</button>}
                     <button className="icon-btn present-act" title="Present from here" disabled={!fullscreen.supported} onClick={() => presentFrom(p.id)}>▶</button>
                     <button className="icon-btn present-act" title="Remove" onClick={() => removeItem(p)}>×</button>
                   </div>
@@ -490,7 +458,7 @@ function Frame({ p, src, active }: { p: Presentation; src?: string; active: bool
   };
 
   let body;
-  if (p.kind === 'poll' && p.poll) body = <PollStage poll={p.poll} fallbackQuestion={p.name} />;
+  if (p.kind === 'poll' && p.poll) body = <PollStage poll={p.poll} fallbackQuestion={p.name} active={active} />;
   else if (!src) body = <div className="stage-empty">{p.kind === 'embed' ? 'No link' : 'Loading file… (if this stays, upload the file again)'}</div>;
   else if (p.kind === 'image') body = <img src={src} alt={p.name} />;
   else if (p.kind === 'video') body = <video ref={mediaRef as React.RefObject<HTMLVideoElement>} {...mediaProps} playsInline />;

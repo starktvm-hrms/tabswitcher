@@ -1,19 +1,24 @@
 #!/usr/bin/env node
-// Live word-cloud poll server for the Seminar Presenter. Node.js only — no dependencies.
+// Live quiz/poll server for the Seminar Presenter. Node.js only — no dependencies.
 //
 //   PORT=8791 DATA_DIR=./data node server/poll-server.mjs
 //
-// Public:   POST /api/polls                      create  → { code, hostKey }
-//           GET  /api/polls/:code                 audience info
-//           POST /api/polls/:code/answers         { pid, text } (word cloud) or { pid, choice } (multiple choice)
-//           GET  /api/polls/:code/results         word-cloud data
+// A poll is a quiz: several questions (word cloud, multiple choice, rating, open text)
+// shown one at a time, all behind ONE join code / QR code.
+//
+// Public:   POST /api/polls                      create { title?, questions[] } → { code, hostKey }
+//           GET  /api/polls/:code                 phones: quiz position + current question
+//           POST /api/polls/:code/answers         { pid, qid, text | choice | value }
+//           GET  /api/polls/:code/results         current question's live results
 //           GET  /api/polls/:code/stream          Server-Sent Events with live results
 // Host only (header X-Host-Key):
-//           PATCH  /api/polls/:code               { open?, question?, perPerson?, revealed? }
-//           POST   /api/polls/:code/hide          { key }   hide a word from the cloud
-//           POST   /api/polls/:code/unhide        show all hidden words again
-//           POST   /api/polls/:code/clear         delete all answers
-//           DELETE /api/polls/:code               delete the poll
+//           PATCH  /api/polls/:code               { current?, open?, revealed?, question? }
+//           GET    /api/polls/:code/admin         full question list (for the editor)
+//           PUT    /api/polls/:code/questions     { title?, questions[] } edit the quiz
+//           POST   /api/polls/:code/hide          { key }   hide a word / an open answer
+//           POST   /api/polls/:code/unhide        show hidden answers again
+//           POST   /api/polls/:code/clear         delete the current question's answers
+//           DELETE /api/polls/:code               delete the quiz
 
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -21,7 +26,8 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/pro
 import path from 'node:path';
 import { createWorkspaces } from './workspace.mjs';
 import {
-  LIMITS, checkAnswer, checkVote, cleanText, pollType, isCode, makeCode, publicInfo, rateLimiter, results, validateNewPoll, wordKey,
+  LIMITS, adminView, applyEdit, checkAnswer, checkOpen, checkRating, checkVote, cleanText, currentQuestion, isCode, makeCode,
+  makeQuestion, migrate, publicInfo, rateLimiter, results, validateNewPoll, wordKey,
 } from './poll-core.mjs';
 
 const MAX_POLLS = 2000;
@@ -43,7 +49,7 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
       try {
         const p = JSON.parse(await readFile(path.join(dataDir, f), 'utf8'));
         if (Date.now() - (p.updatedAt ?? p.createdAt) > RETENTION_MS) { await unlink(path.join(dataDir, f)); continue; }
-        if (isCode(p.code)) polls.set(p.code, p);
+        if (isCode(p.code)) polls.set(p.code, migrate(p));
       } catch (e) {
         log(`skipping unreadable poll file ${f}: ${e.message}`);
       }
@@ -151,23 +157,23 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     if (url.pathname === '/api/polls' && req.method === 'POST') {
       if (!allowCreate(ip)) return json(res, 429, { error: 'Too many polls created. Try again later.' });
       if (polls.size >= MAX_POLLS) return json(res, 503, { error: 'Poll storage is full.' });
-      const v = validateNewPoll(await readBody(req));
+      const v = validateNewPoll(await readBody(req, LIMITS.quizBytes));
       if (v.error) return json(res, 400, v);
       let code;
       do code = makeCode(5); while (polls.has(code));
       const hostKey = randomBytes(24).toString('base64url');
       const poll = {
-        code, type: v.type, question: v.question, perPerson: v.perPerson, open: true,
-        ...(v.type === 'choice' ? { options: v.options, correct: v.correct, revealed: false } : {}),
-        hostHash: hash(hostKey).toString('base64'), createdAt: Date.now(), answers: [], hidden: [],
+        code, title: v.title, current: 0, seq: v.questions.length,
+        questions: v.questions.map((q, i) => makeQuestion(q, `q${i + 1}`)),
+        hostHash: hash(hostKey).toString('base64'), createdAt: Date.now(),
       };
       polls.set(code, poll);
       save(poll);
-      log(`poll ${code} created`);
+      log(`quiz ${code} created (${poll.questions.length} question${poll.questions.length === 1 ? '' : 's'})`);
       return json(res, 201, { code, hostKey, ...publicInfo(poll) });
     }
 
-    const m = /^\/api\/polls\/([A-Za-z0-9]{4,8})(\/(answers|results|stream|hide|unhide|clear))?$/.exec(url.pathname);
+    const m = /^\/api\/polls\/([A-Za-z0-9]{4,8})(\/(answers|results|stream|hide|unhide|clear|admin|questions))?$/.exec(url.pathname);
     if (!m) return json(res, 404, { error: 'Not found' });
     const code = m[1].toUpperCase();
     const poll = isCode(code) ? polls.get(code) : undefined;
@@ -191,65 +197,68 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
     if (action === 'answers' && req.method === 'POST') {
       if (!allowAnswer(ip)) return json(res, 429, { error: 'Too many answers from this network. Please wait a moment.' });
       const body = await readBody(req);
-      if (pollType(poll) === 'choice') {
-        const v = checkVote(poll, body.pid, body.choice);
-        if (v.error) return json(res, v.error === 'Voting is closed.' ? 409 : 400, v);
-        const vote = { pid: body.pid, choice: v.choice, at: Date.now() };
-        if (v.previous >= 0) poll.answers[v.previous] = vote; else poll.answers.push(vote);
-        save(poll);
-        push(code);
-        return json(res, 201, { ok: true, choice: v.choice, changed: v.previous >= 0 });
+      const q = currentQuestion(poll);
+      // Phones say which question they answer; if the presenter moved on meanwhile, refuse.
+      if (body.qid !== undefined && body.qid !== q.id) return json(res, 409, { error: 'The presenter has moved to another question.', moved: true });
+      const fail = (r) => json(res, r.error === 'Voting is closed.' ? 409 : 400, r);
+      const done = (status, out) => { save(poll); push(code); return json(res, status, out); };
+      if (q.type === 'choice' || q.type === 'rating') {
+        const v = q.type === 'choice' ? checkVote(q, body.pid, body.choice) : checkRating(q, body.pid, body.value);
+        if (v.error) return fail(v);
+        const vote = { pid: body.pid, ...(q.type === 'choice' ? { choice: v.choice } : { value: v.value }), at: Date.now() };
+        if (v.previous >= 0) q.answers[v.previous] = vote; else q.answers.push(vote);
+        return done(201, { ok: true, ...(q.type === 'choice' ? { choice: v.choice } : { value: v.value }), changed: v.previous >= 0 });
       }
-      const r = checkAnswer(poll, body.pid, body.text);
-      if (r.error) return json(res, r.error === 'Voting is closed.' ? 409 : 400, r);
-      poll.answers.push({ pid: body.pid, text: r.text, at: Date.now() });
-      save(poll);
-      push(code);
-      return json(res, 201, { ok: true, left: r.left });
+      const r = q.type === 'open' ? checkOpen(q, body.pid, body.text) : checkAnswer(q, body.pid, body.text);
+      if (r.error) return fail(r);
+      q.answers.push({ pid: body.pid, text: r.text, at: Date.now(), ...(q.type === 'open' ? { id: randomBytes(6).toString('base64url') } : {}) });
+      return done(201, { ok: true, left: r.left });
     }
 
     // Everything below needs the host key.
     if (!isHost(req, poll)) return json(res, 403, { error: 'Only the presenter can do that.' });
 
+    const q = currentQuestion(poll);
+    const done = () => { save(poll); push(code); return json(res, 200, results(poll)); };
     if (!action && req.method === 'PATCH') {
       const body = await readBody(req);
-      if (typeof body.open === 'boolean') poll.open = body.open;
-      if (typeof body.revealed === 'boolean' && pollType(poll) === 'choice') poll.revealed = body.revealed;
+      if (body.current !== undefined) {
+        const n = Number(body.current);
+        if (!Number.isInteger(n) || n < 0 || n >= poll.questions.length) return json(res, 400, { error: 'No such question.' });
+        poll.current = n;
+      }
+      const cq = currentQuestion(poll);
+      if (typeof body.open === 'boolean') cq.open = body.open;
+      if (typeof body.revealed === 'boolean' && cq.type === 'choice') cq.revealed = body.revealed;
       if (body.question !== undefined) {
-        const q = cleanText(body.question, LIMITS.questionMax);
-        if (!q) return json(res, 400, { error: 'Please enter a question.' });
-        poll.question = q;
+        const t = cleanText(body.question, LIMITS.questionMax);
+        if (!t) return json(res, 400, { error: 'Please enter a question.' });
+        cq.question = t;
       }
-      if (body.perPerson !== undefined && pollType(poll) === 'cloud') {
-        const n = Number(body.perPerson);
-        if (Number.isInteger(n) && n >= 1 && n <= LIMITS.perPersonMax) poll.perPerson = n;
-      }
-      save(poll); push(code);
-      return json(res, 200, results(poll));
+      return done();
+    }
+    if (action === 'admin' && req.method === 'GET') return json(res, 200, adminView(poll));
+    if (action === 'questions' && req.method === 'PUT') {
+      const r = applyEdit(poll, await readBody(req, LIMITS.quizBytes));
+      if (r.error) return json(res, 400, r);
+      return done();
     }
     if (action === 'hide' && req.method === 'POST') {
-      const k = wordKey(cleanText((await readBody(req)).key, LIMITS.answerMax * 2));
-      if (k && !poll.hidden.includes(k)) poll.hidden.push(k);
-      save(poll); push(code);
-      return json(res, 200, results(poll));
+      const raw = (await readBody(req)).key;
+      // Word cloud: hide a word (all spellings). Open text: hide one answer by id.
+      const k = q.type === 'open' ? (typeof raw === 'string' ? raw.slice(0, 32) : '') : wordKey(cleanText(raw, LIMITS.answerMax * 2));
+      if (k && !q.hidden.includes(k)) q.hidden.push(k);
+      return done();
     }
-    if (action === 'unhide' && req.method === 'POST') {
-      poll.hidden = [];
-      save(poll); push(code);
-      return json(res, 200, results(poll));
-    }
-    if (action === 'clear' && req.method === 'POST') {
-      poll.answers = []; poll.hidden = [];
-      save(poll); push(code);
-      return json(res, 200, results(poll));
-    }
+    if (action === 'unhide' && req.method === 'POST') { q.hidden = []; return done(); }
+    if (action === 'clear' && req.method === 'POST') { q.answers = []; q.hidden = []; q.revealed = false; return done(); }
     if (!action && req.method === 'DELETE') {
       polls.delete(code);
       clearTimeout(saveTimers.get(code)); saveTimers.delete(code);
       if (dataDir) await unlink(path.join(dataDir, `${code}.json`)).catch(() => {});
       for (const r of streams.get(code) ?? []) { sendTo(r, undefined); r.end(); }
       streams.delete(code);
-      log(`poll ${code} deleted`);
+      log(`quiz ${code} deleted`);
       return json(res, 200, { ok: true });
     }
     return json(res, 405, { error: 'Method not allowed' });

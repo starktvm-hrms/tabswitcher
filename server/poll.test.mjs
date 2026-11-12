@@ -131,7 +131,7 @@ describe('poll server (HTTP)', () => {
     await srv.flush();
     expect(await readdir(dir)).toContain(`${code}.json`);
     const again = await createPollServer({ dataDir: dir, log: () => {} });
-    expect(again.polls.get(code).answers).toHaveLength(3);
+    expect(again.polls.get(code).questions[0].answers).toHaveLength(3);
 
     // Delete ends the stream and removes the file.
     expect((await req(`/api/polls/${code}`, { method: 'DELETE', headers: host })).status).toBe(200);
@@ -146,7 +146,7 @@ describe('poll server (HTTP)', () => {
   it('rejects bad input', async () => {
     expect((await req('/api/polls', { method: 'POST', body: JSON.stringify({ question: '   ' }) })).status).toBe(400);
     expect((await req('/api/polls', { method: 'POST', body: '{nope' })).status).toBe(400);
-    expect((await req('/api/polls', { method: 'POST', body: JSON.stringify({ question: 'x'.repeat(10000) }) })).status).toBe(413);
+    expect((await req('/api/polls', { method: 'POST', body: JSON.stringify({ question: 'x'.repeat(70000) }) })).status).toBe(413);
     expect((await req('/api/polls/ZZZZZ')).status).toBe(404);
     expect((await req('/api/nothing')).status).toBe(404);
   });
@@ -154,7 +154,7 @@ describe('poll server (HTTP)', () => {
 
 describe('multiple-choice polls', () => {
   it('validates options and the correct answer', async () => {
-    const { validateNewPoll } = await import('./poll-core.mjs');
+    const { validateQuestion: validateNewPoll } = await import('./poll-core.mjs');
     expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['A'] })).toHaveProperty('error');
     expect(validateNewPoll({ type: 'choice', question: 'Q?', options: ['Yes', 'yes!'] })).toHaveProperty('error', 'Two options are the same.');
     expect(validateNewPoll({ type: 'choice', question: 'Q?', options: Array.from({ length: 9 }, (_, i) => `O${i}`) })).toHaveProperty('error');
