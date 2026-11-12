@@ -3,7 +3,7 @@
  * embeddable URLs and classify uploaded files. No DOM, so they're unit tested.
  */
 
-export type MediaKind = 'embed' | 'pdf' | 'image' | 'video';
+export type MediaKind = 'embed' | 'pdf' | 'image' | 'video' | 'poll';
 
 export type Presentation = {
   id: string;
@@ -15,6 +15,8 @@ export type Presentation = {
   original?: string;
   /** Short label of the provider/file type, e.g. "Google Slides", "PDF". */
   source: string;
+  /** For live polls: the join code and the presenter's secret key (kept only in this browser). */
+  poll?: { code: string; hostKey: string };
 };
 
 export type ParsedLink = { src: string; source: string; name: string } | { error: string };

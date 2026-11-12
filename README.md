@@ -21,7 +21,23 @@ While presenting:
 - Videos pause when you switch away.
 - **Esc** or **⤡ Exit** leaves fullscreen.
 
-The list is saved in this browser, and uploaded files are kept in IndexedDB. Nothing is uploaded to a server.
+The list is saved in this browser, and uploaded files are kept in IndexedDB; decks and files are never uploaded. Only poll questions and answers are stored on the server.
+
+## Live word-cloud polls
+
+Ask the room a question and watch the answers appear as a word cloud, live.
+
+1. Click **☁ Word-cloud poll**, type the question, choose how many answers each person may send (1–5), and click **Create poll**. The poll becomes a tab in the playlist and in the fullscreen switcher bar, next to your decks.
+2. The poll screen shows the question, a **QR code** and the join link (`seminar.starkpeople.in/p/CODE`). People scan the code with their phone, type an answer and press **Send**.
+3. Answers appear in the cloud within a second. Common answers grow bigger, and spelling variants count as one word ("Inspiring", "inspiring!" and "INSPIRING").
+4. Presenter controls are at the bottom of the poll screen and work in fullscreen:
+   - **Hide QR** gives the cloud more room.
+   - **Close voting** / **Reopen voting**.
+   - **Clear** deletes all answers.
+   - **Click a word** to hide it, for moderation.
+   - **Show N hidden** brings hidden words back.
+
+Each browser holds the presenter key for the polls it created, so only that browser can control them. Removing a poll from the list deletes it and its answers from the server. Polls are kept for 90 days.
 
 **A deck shows a blank or "refused to connect" page?** It has to be shared publicly ("Anyone with the link" in Google Slides or Canva; File → Share → Embed in PowerPoint). Some sites don't allow being shown inside another page at all. For those, download the deck as PDF and upload it.
 
@@ -30,7 +46,8 @@ The list is saved in this browser, and uploaded files are kept in IndexedDB. Not
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # unit tests (link conversion, file checks)
+npm run server     # poll API on http://127.0.0.1:8791 (the dev server proxies /api to it)
+npm test           # unit + API tests
 npm run build      # type-check + production build to dist/
 ```
 
@@ -40,6 +57,8 @@ src/
   present.ts       share link → embed link conversion, file checks (pure, tested)
   presentStore.ts  playlist (localStorage) + uploaded files (IndexedDB)
   useFullscreen.ts element fullscreen hook
+  poll/            word-cloud poll: presenter stage, audience page (/p/CODE), QR code, cloud layout, API client
+server/            poll server (Node.js, no dependencies): API, live updates (SSE), JSON storage
 deploy/            one-time VPS setup script + deploy docs
 .github/workflows/  deploy.yml (build + publish on push to main), setup-server.yml (one-time VPS setup)
 ```

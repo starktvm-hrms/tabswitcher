@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type RefObjec
 import { useFullscreen } from './useFullscreen';
 import { baseName, fileKind, move, toEmbed, type Presentation } from './present';
 import { usePresentations } from './presentStore';
+import { createPoll, hostApi, joinUrl } from './poll/api';
+import { PollStage } from './poll/PollStage';
 
 /**
  * Presentation player. Browsers always leave fullscreen when you switch browser
@@ -16,6 +18,10 @@ export default function Presenter() {
   const [link, setLink] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [pollForm, setPollForm] = useState(false);
+  const [pollQ, setPollQ] = useState('');
+  const [pollPer, setPollPer] = useState(3);
+  const [pollBusy, setPollBusy] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const fullscreen = useFullscreen(stageRef, { lockEscape: false });
 
@@ -45,6 +51,31 @@ export default function Presenter() {
     setErrors(errs);
   };
 
+  const addPoll = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pollQ.trim() || pollBusy) return;
+    setPollBusy(true);
+    try {
+      const created = await createPoll(pollQ, pollPer);
+      const id = store.addLink({ name: created.question, kind: 'poll', src: '', source: 'Word cloud poll', poll: { code: created.code, hostKey: created.hostKey } });
+      setActiveId(id);
+      setPollQ('');
+      setPollForm(false);
+      setErrors([]);
+    } catch (err) {
+      setErrors([(err as Error).message]);
+    } finally {
+      setPollBusy(false);
+    }
+  };
+
+  const removeItem = (p: Presentation) => {
+    const msg = p.poll ? `Delete the poll “${p.name}” and all its answers?` : `Remove “${p.name}”?`;
+    if (!window.confirm(msg)) return;
+    if (p.poll) hostApi(p.poll).remove().catch(() => { /* already gone */ });
+    store.remove(p.id);
+  };
+
   const presentFrom = (id?: string) => {
     if (id) setActiveId(id);
     if (!fullscreen.active) fullscreen.toggle();
@@ -56,7 +87,7 @@ export default function Presenter() {
         <div>
           <h1>Seminar Presenter</h1>
           <p className="muted">
-            Line up decks, PDFs and videos, then present them in one fullscreen window. Switch between them from the bar
+            Line up decks, PDFs, videos and live word-cloud polls, then present them in one fullscreen window. Switch between them from the bar
             at the bottom of the screen without leaving fullscreen.
           </p>
         </div>
@@ -91,13 +122,37 @@ export default function Presenter() {
                 accept="application/pdf,image/*,video/*,.pdf,.pptx,.ppt,.key"
                 onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }}
               />
-              <span className="muted small">PowerPoint/Keynote files: export as PDF first.</span>
+              <button className="btn" onClick={() => setPollForm((v) => !v)} aria-expanded={pollForm}>☁ Word-cloud poll</button>
             </div>
+            <span className="muted small">PowerPoint/Keynote files: export as PDF first.</span>
+            {pollForm && (
+              <form className="poll-form" onSubmit={addPoll}>
+                <input
+                  value={pollQ}
+                  onChange={(e) => setPollQ(e.target.value)}
+                  maxLength={200}
+                  placeholder="Question, e.g. “One word to describe today?”"
+                  aria-label="Poll question"
+                  autoFocus
+                />
+                <div className="row gap wrap">
+                  <label className="row gap small muted">
+                    Answers per person
+                    <select value={pollPer} onChange={(e) => setPollPer(Number(e.target.value))} style={{ width: 'auto' }}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n}>{n}</option>)}
+                    </select>
+                  </label>
+                  <span className="grow" />
+                  <button className="btn" type="button" onClick={() => setPollForm(false)}>Cancel</button>
+                  <button className="btn btn-primary" type="submit" disabled={!pollQ.trim() || pollBusy}>{pollBusy ? 'Creating…' : 'Create poll'}</button>
+                </div>
+              </form>
+            )}
             {errors.map((err) => <div key={err} className="present-error" role="alert">{err}</div>)}
           </div>
 
           {items.length === 0 ? (
-            <div className="empty">No presentations yet. Add a link or upload a file to get started.</div>
+            <div className="empty">No presentations yet. Add a link, upload a file or create a word-cloud poll to get started.</div>
           ) : (
             <ol className="present-list">
               {items.map((p, i) => (
@@ -115,13 +170,15 @@ export default function Presenter() {
                       <span>{p.source}</span>
                       {store.missing.has(p.id) && <span className="bad">· file missing, upload it again</span>}
                       {p.original && <a href={p.original} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>open original ↗</a>}
+                      {p.poll && <span>· code <b>{p.poll.code}</b></span>}
+                      {p.poll && <a href={joinUrl(p.poll.code)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>audience page ↗</a>}
                     </div>
                   </div>
                   <div className="row" onClick={(e) => e.stopPropagation()}>
                     <button className="icon-btn present-act" title="Move up" disabled={i === 0} onClick={() => store.reorder(move(items, i, i - 1))}>↑</button>
                     <button className="icon-btn present-act" title="Move down" disabled={i === items.length - 1} onClick={() => store.reorder(move(items, i, i + 1))}>↓</button>
                     <button className="icon-btn present-act" title="Present from here" disabled={!fullscreen.supported} onClick={() => presentFrom(p.id)}>▶</button>
-                    <button className="icon-btn present-act" title="Remove" onClick={() => window.confirm(`Remove “${p.name}”?`) && store.remove(p.id)}>×</button>
+                    <button className="icon-btn present-act" title="Remove" onClick={() => removeItem(p)}>×</button>
                   </div>
                 </li>
               ))}
@@ -286,7 +343,8 @@ function Frame({ p, src, active }: { p: Presentation; src?: string; active: bool
   }, [active, src]);
 
   let body;
-  if (!src) body = <div className="stage-empty">{p.kind === 'embed' ? 'No link' : 'Loading file… (if this stays, upload the file again)'}</div>;
+  if (p.kind === 'poll' && p.poll) body = <PollStage poll={p.poll} fallbackQuestion={p.name} />;
+  else if (!src) body = <div className="stage-empty">{p.kind === 'embed' ? 'No link' : 'Loading file… (if this stays, upload the file again)'}</div>;
   else if (p.kind === 'image') body = <img src={src} alt={p.name} />;
   else if (p.kind === 'video') body = <video ref={videoRef} src={src} controls playsInline />;
   else {

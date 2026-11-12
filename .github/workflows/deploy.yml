@@ -38,8 +38,12 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Stamp the build
-        run: echo "$GITHUB_SHA" > dist/version.txt
+      - name: Stamp the build and add the poll server
+        run: |
+          echo "$GITHUB_SHA" > dist/version.txt
+          # The VPS sync job installs .server/ as the poll server (it is not served as part of the site).
+          mkdir -p dist/.server
+          cp server/poll-core.mjs server/poll-server.mjs dist/.server/
 
       - name: Publish to the deploy-build branch
         env:
@@ -59,7 +63,16 @@ jobs:
           for i in $(seq 1 30); do
             live=$(curl -fsSL --max-time 10 https://seminar.starkpeople.in/version.txt 2>/dev/null \
                 || curl -fsSL --max-time 10 http://seminar.starkpeople.in/version.txt 2>/dev/null || true)
-            if [ "$live" = "$GITHUB_SHA" ]; then echo "Live at https://seminar.starkpeople.in"; exit 0; fi
+            if [ "$live" = "$GITHUB_SHA" ]; then
+              echo "Live at https://seminar.starkpeople.in"
+              # The poll server restarts on new code; give it a few seconds, then check it.
+              for j in $(seq 1 12); do
+                if curl -fsS --max-time 10 https://seminar.starkpeople.in/api/health | grep -q '"ok":true'; then echo "Poll server OK"; exit 0; fi
+                sleep 5
+              done
+              echo "::warning::The site is live, but the poll server isn't answering at /api/health. Run the 'Set up server' workflow."
+              exit 0
+            fi
             sleep 10
           done
           if [ -z "$live" ] || ! printf '%s' "$live" | grep -Eq '^[0-9a-f]{40}$'; then

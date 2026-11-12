@@ -63,7 +63,7 @@ export function usePresentations() {
   // Load blobs for file-based items that don't have a URL yet.
   useEffect(() => {
     let cancelled = false;
-    const need = items.filter((p) => p.kind !== 'embed' && !p.src && !urlsRef.current[p.id] && !missing.has(p.id));
+    const need = items.filter((p) => p.kind !== 'embed' && p.kind !== 'poll' && !p.src && !urlsRef.current[p.id] && !missing.has(p.id));
     if (!need.length) return;
     (async () => {
       const found: Record<string, string> = {};
@@ -87,7 +87,9 @@ export function usePresentations() {
   useEffect(() => () => Object.values(urlsRef.current).forEach(URL.revokeObjectURL), []);
 
   const addLink = useCallback((p: Omit<Presentation, 'id'>) => {
-    setItems((list) => [...list, { ...p, id: uid() }]);
+    const id = uid();
+    setItems((list) => [...list, { ...p, id }]);
+    return id;
   }, []);
 
   const addFile = useCallback(async (file: File, p: Omit<Presentation, 'id' | 'src'>) => {
