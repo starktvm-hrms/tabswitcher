@@ -184,7 +184,8 @@ input[type='checkbox'] { width: auto; }
 .poll-join { flex: none; width: clamp(110px, 19%, 320px); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; }
 .qr { width: 100%; height: auto; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
 .poll-join-text { display: flex; flex-direction: column; gap: 2px; font-size: clamp(11px, 1vw, 18px); color: #b9bfdb; }
-.poll-join-text b { color: #fff; font-size: clamp(12px, 1.25vw, 24px); word-break: break-all; }
+.poll-join-text b { color: #fff; font-size: clamp(12px, 1.25vw, 24px); overflow-wrap: anywhere; }
+.poll-join-text .poll-code { font-size: clamp(20px, 2.6vw, 52px); letter-spacing: .12em; margin-top: 2px; }
 .poll-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 0 10px; font-size: clamp(11px, 0.95vw, 15px); color: #b9bfdb; border-top: 1px solid rgba(255,255,255,.08); }
 .poll-status.open { color: #34d399; font-weight: 650; }
 .poll-status.closed { color: #fbbf24; font-weight: 650; }
