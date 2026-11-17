@@ -21,6 +21,18 @@ While presenting:
 - Videos pause when you switch away.
 - **Esc** or **⤡ Exit** leaves fullscreen.
 
+## Applications and browser tabs as tabs
+
+The bar at the bottom works like browser tabs. Each tab has an icon, and **＋** adds a new one, also in fullscreen:
+- **Link:** a web page or deck (Google Slides, Canva, YouTube…).
+- **Application:** any open program (PowerPoint, Excel, a software demo, a PDF reader…) shown **live**.
+- **Browser tab:** another tab shown live. This works for any website, including ones that can't be embedded, like Gmail or logged-in dashboards.
+- **Whole screen:** everything on another monitor.
+
+The same options are also in the list: **🗔 Add application** and **⧉ Add browser tab**.
+
+Live tabs are view-only mirrors. The best setup is a laptop plus a projector: present fullscreen on the projector and use the app on your laptop screen, and the audience sees it live. On a single screen, press **Alt+Tab** to switch to the app, then back. Live tabs need Chrome or Edge. After a reload, or on another computer, a live tab shows **Reconnect** and you pick the window again.
+
 ## Use it on any computer
 
 Your presentations live in a **workspace** on the server: the list, uploaded PDFs, images and videos, and control of your polls. Open **⇆ Use on another computer** to get the workspace link and QR code. Opening that link on any computer, like the podium PC or a colleague's laptop, shows the same presentations. Changes on one computer appear on the others within a few seconds. The badge at the top shows whether everything is saved.

@@ -417,3 +417,29 @@ textarea.aud-input { min-height: 110px; resize: vertical; }
 .mom th, .mom td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; }
 .mom th { background: var(--panel-2); }
 .mom code { background: var(--panel-2); padding: 0 4px; border-radius: 4px; }
+
+/* ---------- Browser-style tabs + live apps ---------- */
+.dock-ico { font-size: 13px; line-height: 1; }
+.dock-add { font-size: 16px; padding: 3px 10px; }
+.add-menu {
+  position: absolute; left: 50%; bottom: 76px; transform: translateX(-50%); z-index: 4; width: min(560px, calc(100% - 24px));
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 14px; padding: 12px;
+  box-shadow: 0 20px 50px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 10px;
+}
+.stage:not(.is-fs) .add-menu { bottom: 12px; }
+.add-live { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.add-opt { display: flex; gap: 10px; align-items: flex-start; text-align: left; cursor: pointer; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); border-radius: 10px; padding: 10px; font: inherit; }
+.add-opt:hover { border-color: var(--accent); }
+.add-opt b { display: block; }
+.add-opt small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.add-ico { font-size: 22px; line-height: 1; }
+.live-frame { position: absolute; inset: 0; background: #000; display: grid; place-items: center; }
+.live-frame video { width: 100%; height: 100%; object-fit: contain; }
+.live-frame video.off { display: none; }
+.live-off { display: flex; flex-direction: column; align-items: center; gap: 10px; color: #cbd0e6; text-align: center; padding: 24px; }
+.live-off b { color: #fff; font-size: 18px; }
+.live-off-ico { font-size: 44px; }
+.live-badge { position: absolute; top: 12px; right: 12px; display: flex; align-items: center; gap: 6px; font: 600 12px/1 Inter, system-ui, sans-serif; color: #fff; background: rgba(15,18,32,.7); border-radius: 99px; padding: 5px 10px; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-badge i { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex: none; }
+.live-tip { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: rgba(15,18,32,.88); color: #eef0fa; border-radius: 12px; padding: 10px 14px; font-size: 14px; display: flex; gap: 10px; align-items: center; max-width: calc(100% - 200px); }
+.live-tip kbd { background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.2); color: #fff; }

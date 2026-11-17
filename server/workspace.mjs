@@ -80,6 +80,7 @@ export function sanitizeItems(items) {
     if (it.fileId) out.fileId = str(it.fileId, 64);
     if (it.size) out.size = Number(it.size) || 0;
     if (it.stopOnLeave === true) out.stopOnLeave = true;
+    if (['window', 'browser', 'monitor'].includes(it.surface)) out.surface = it.surface;
     if (it.poll && typeof it.poll === 'object') out.poll = { code: str(it.poll.code, 8) ?? '', hostKey: str(it.poll.hostKey, 64) ?? '' };
     return out;
   }).filter(Boolean);

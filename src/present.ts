@@ -3,7 +3,7 @@
  * embeddable URLs and classify uploaded files. No DOM, so they're unit tested.
  */
 
-export type MediaKind = 'embed' | 'pdf' | 'image' | 'video' | 'audio' | 'poll';
+export type MediaKind = 'embed' | 'pdf' | 'image' | 'video' | 'audio' | 'poll' | 'live';
 
 export type Presentation = {
   id: string;
@@ -24,6 +24,8 @@ export type Presentation = {
    * from the beginning when you come back.
    */
   stopOnLeave?: boolean;
+  /** Live tabs: what is shown — an application window, another browser tab, or a screen. */
+  surface?: 'window' | 'browser' | 'monitor';
   /** For live polls: the join code and the presenter's secret key (kept only in this browser). */
   poll?: { code: string; hostKey: string };
 };

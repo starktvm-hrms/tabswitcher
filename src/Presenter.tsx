@@ -8,6 +8,7 @@ import { PollStage } from './poll/PollStage';
 import { Qr } from './poll/Qr';
 import { parseShareLink, shareLink, uploadFile } from './workspace';
 import { canRecord, fmtClock, useRecorder, type Recording } from './recorder';
+import { canCapture, capture, dropStream, setStream, surfaceIcon, useLiveStream, type Surface } from './live';
 import { AiSettingsPanel, MeetingsPanel } from './meetings/Meetings';
 import { createMeeting, download, getSettings, safeName, startTranscribe } from './meetings/api';
 
@@ -102,7 +103,39 @@ export default function Presenter() {
     const msg = p.poll ? `Delete the quiz “${p.name}” and all its answers?` : `Remove “${p.name}”?`;
     if (!window.confirm(msg)) return;
     if (p.poll) hostApi(p.poll).remove().catch(() => { /* already gone */ });
+    if (p.kind === 'live') dropStream(p.id);
     store.remove(p.id);
+  };
+
+  /** Adds an application window / browser tab / screen as a live tab. */
+  const addLive = async (prefer: Surface) => {
+    try {
+      const { stream, surface, label } = await capture(prefer);
+      const id = store.addLink({ name: label, kind: 'live', src: '', source: surface === 'window' ? 'Application (live)' : surface === 'browser' ? 'Browser tab (live)' : 'Screen (live)', surface });
+      setStream(id, stream);
+      setActiveId(id);
+      setErrors([]);
+    } catch (e) {
+      if ((e as Error).name !== 'NotAllowedError') setErrors([`Couldn’t add it: ${(e as Error).message}`]);
+    }
+  };
+
+  /** Picks the window/tab again for a live tab whose stream is gone (reload, other computer). */
+  const reconnectLive = async (p: Presentation) => {
+    try {
+      const { stream, surface, label } = await capture(p.surface ?? 'window');
+      setStream(p.id, stream);
+      if (label !== p.name && /^(Application window|Browser tab|Screen)$/.test(p.name)) store.update(p.id, { name: label, surface });
+    } catch { /* cancelled */ }
+  };
+
+  /** From the tab strip's ＋ menu (also in fullscreen): add a link. Returns an error message, if any. */
+  const addLinkFromStage = (url: string): string | undefined => {
+    const r = toEmbed(url);
+    if ('error' in r) return r.error;
+    const id = store.addLink({ name: r.name, kind: 'embed', src: r.src, original: url.trim(), source: r.source });
+    setActiveId(id);
+    return undefined;
   };
 
   const presentFrom = (id?: string) => {
@@ -174,6 +207,12 @@ export default function Presenter() {
                 onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }}
               />
             </div>
+            {canCapture() && (
+              <div className="row gap wrap">
+                <button className="btn" onClick={() => addLive('window')} title="Show an open application (PowerPoint, Excel, a demo…) live as a tab">🗔 Add application</button>
+                <button className="btn" onClick={() => addLive('browser')} title="Show another browser tab live — works for any website, including ones that can’t be embedded">⧉ Add browser tab</button>
+              </div>
+            )}
             <div className="row gap wrap">
               <button className={`btn ${quizEdit && !quizEdit.itemId ? 'btn-on' : ''}`} onClick={() => setQuizEdit((v) => (v && !v.itemId ? false : {}))} aria-expanded={!!quizEdit && !quizEdit.itemId}>
                 ＋ Quiz / poll
@@ -268,6 +307,9 @@ export default function Presenter() {
           onSelect={setActiveId}
           fullscreen={fullscreen}
           recorder={recorder}
+          onAddLink={addLinkFromStage}
+          onAddLive={addLive}
+          onReconnect={reconnectLive}
         />
       </div>
 
@@ -353,7 +395,7 @@ function ThemeToggle() {
 
 /* ------------------------------------------------------------------ */
 
-function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorder }: {
+function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorder, onAddLink, onAddLive, onReconnect }: {
   stageRef: RefObject<HTMLDivElement | null>;
   items: Presentation[];
   srcOf: (p: Presentation) => string | undefined;
@@ -361,7 +403,11 @@ function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorde
   onSelect: (id: string) => void;
   fullscreen: ReturnType<typeof useFullscreen>;
   recorder: ReturnType<typeof useRecorder>;
+  onAddLink: (url: string) => string | undefined;
+  onAddLive: (prefer: Surface) => void;
+  onReconnect: (p: Presentation) => void;
 }) {
+  const [addOpen, setAddOpen] = useState(false);
   const idx = Math.max(0, items.findIndex((p) => p.id === activeId));
   const active = items[idx];
 
@@ -404,8 +450,9 @@ function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorde
     <div ref={stageRef} className={`stage ${fullscreen.active ? 'is-fs' : 'card'}`} onMouseMove={fullscreen.active ? showDock : undefined}>
       <div className="stage-view">
         {items.length === 0 && <div className="stage-empty">Your presentations will appear here.</div>}
+        {addOpen && <AddTabMenu onClose={() => setAddOpen(false)} onAddLink={onAddLink} onAddLive={(s) => { setAddOpen(false); onAddLive(s); }} />}
         {items.map((p) => mounted.has(p.id) && (
-          <Frame key={p.id} p={p} src={srcOf(p)} active={p.id === active?.id} />
+          <Frame key={p.id} p={p} src={srcOf(p)} active={p.id === active?.id} onReconnect={() => onReconnect(p)} />
         ))}
       </div>
 
@@ -435,11 +482,13 @@ function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorde
         <div className="dock-items">
           {items.map((p, i) => (
             <button key={p.id} className={`dock-item ${p.id === active?.id ? 'active' : ''}`} onClick={() => go(p.id)} title={p.name} aria-current={p.id === active?.id}>
+              <span className="dock-ico" aria-hidden>{kindIcon(p)}</span>
               <span className="dock-num">{i + 1}</span>
               <span className="dock-name">{p.name}</span>
             </button>
           ))}
         </div>
+        <button className="dock-btn dock-add" onClick={() => { setAddOpen((v) => !v); if (fullscreen.active) showDock(); }} aria-label="Add a tab" title="Add a tab: web page, application or browser tab">＋</button>
         <button className="dock-btn" onClick={() => step(1)} disabled={items.length < 2} aria-label="Next presentation">›</button>
         {fullscreen.supported && (
           <button className="dock-btn dock-fs" onClick={fullscreen.toggle} disabled={!items.length}>
@@ -469,7 +518,7 @@ function pauseOtherMedia(playing: HTMLMediaElement) {
 /** True for embeds we can pause ourselves (YouTube/Vimeo players). */
 export const canPauseEmbed = (src: string) => src.includes('youtube.com/embed') || src.includes('player.vimeo.com');
 
-function Frame({ p, src, active }: { p: Presentation; src?: string; active: boolean }) {
+function Frame({ p, src, active, onReconnect }: { p: Presentation; src?: string; active: boolean; onReconnect: () => void }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const mediaRef = useRef<HTMLMediaElement>(null);
   // "Stop sound when switching away": unload the page while it's not on screen.
@@ -494,6 +543,7 @@ function Frame({ p, src, active }: { p: Presentation; src?: string; active: bool
 
   let body;
   if (p.kind === 'poll' && p.poll) body = <PollStage poll={p.poll} fallbackQuestion={p.name} active={active} />;
+  else if (p.kind === 'live') body = <LiveFrame p={p} active={active} onReconnect={onReconnect} />;
   else if (!src) body = <div className="stage-empty">{p.kind === 'embed' ? 'No link' : 'Loading file… (if this stays, upload the file again)'}</div>;
   else if (p.kind === 'image') body = <img src={src} alt={p.name} />;
   else if (p.kind === 'video') body = <video ref={mediaRef as React.RefObject<HTMLVideoElement>} {...mediaProps} playsInline />;
@@ -619,5 +669,90 @@ function SaveRecording({ rec, creds, onDone, onClose, onNeedKeys }: {
       )}
       {note && <div className={phase === 'error' ? 'present-error' : 'sync-msg saved'} role="status">{note}</div>}
     </section>
+  );
+}
+
+/* ---------------------------------------------------------------- tabs: icons, ＋ menu, live apps */
+
+function kindIcon(p: Presentation) {
+  switch (p.kind) {
+    case 'live': return surfaceIcon(p.surface);
+    case 'poll': return '📊';
+    case 'pdf': return '📄';
+    case 'image': return '🖼';
+    case 'video': return '🎬';
+    case 'audio': return '♪';
+    default: return /youtube|vimeo/i.test(p.source) ? '▶' : '🌐';
+  }
+}
+
+/** The tab strip's ＋ menu. Drawn inside the stage, so it also works in fullscreen. */
+function AddTabMenu({ onClose, onAddLink, onAddLive }: { onClose: () => void; onAddLink: (url: string) => string | undefined; onAddLive: (s: Surface) => void }) {
+  const [url, setUrl] = useState('');
+  const [err, setErr] = useState<string>();
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!url.trim()) return;
+    const problem = onAddLink(url);
+    if (problem) setErr(problem); else onClose();
+  };
+  return (
+    <div className="add-menu" role="dialog" aria-label="Add a tab">
+      <div className="row gap"><b>New tab</b><span className="grow" /><button className="dock-btn" onClick={onClose} aria-label="Close">×</button></div>
+      <form className="row gap" onSubmit={submit}>
+        <input autoFocus value={url} onChange={(e) => { setUrl(e.target.value); setErr(undefined); }} placeholder="Paste a link — Google Slides, Canva, YouTube, a website…" aria-label="Link for the new tab" />
+        <button className="btn btn-primary" type="submit" disabled={!url.trim()}>Open</button>
+      </form>
+      {err && <div className="present-error small">{err}</div>}
+      {canCapture() && (
+        <div className="add-live">
+          <button className="add-opt" onClick={() => onAddLive('window')}>
+            <span className="add-ico">🗔</span><span><b>Application</b><small>PowerPoint, Excel, a software demo… shown live</small></span>
+          </button>
+          <button className="add-opt" onClick={() => onAddLive('browser')}>
+            <span className="add-ico">⧉</span><span><b>Browser tab</b><small>Any website, even ones that can’t be embedded</small></span>
+          </button>
+          <button className="add-opt" onClick={() => onAddLive('monitor')}>
+            <span className="add-ico">🖵</span><span><b>Whole screen</b><small>Everything on another monitor</small></span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A live application / browser tab / screen. View-only: control it on your own screen. */
+function LiveFrame({ p, active, onReconnect }: { p: Presentation; active: boolean; onReconnect: () => void }) {
+  const stream = useLiveStream(p.id);
+  const ref = useRef<HTMLVideoElement>(null);
+  const [tip, setTip] = useState(true);
+  useEffect(() => {
+    const v = ref.current;
+    if (!v) return;
+    if (v.srcObject !== (stream ?? null)) v.srcObject = stream ?? null;
+    if (stream) v.play().catch(() => {});
+  }, [stream]);
+  useEffect(() => { if (!active) return; const t = window.setTimeout(() => setTip(false), 6000); return () => window.clearTimeout(t); }, [active]);
+
+  const what = p.surface === 'browser' ? 'browser tab' : p.surface === 'monitor' ? 'screen' : 'application';
+  return (
+    <div className="live-frame">
+      <video ref={ref} muted playsInline autoPlay className={stream ? '' : 'off'} />
+      {!stream && (
+        <div className="live-off">
+          <div className="live-off-ico" aria-hidden>{surfaceIcon(p.surface)}</div>
+          <b>{p.name}</b>
+          <span>Not connected — choose the {what} again to show it here.</span>
+          <button className="btn btn-primary" onClick={onReconnect}>Reconnect</button>
+        </div>
+      )}
+      {stream && <span className="live-badge"><i aria-hidden /> LIVE · {p.name}</span>}
+      {stream && active && tip && p.surface !== 'monitor' && (
+        <div className="live-tip">
+          Shown live. To control it, use it on your laptop screen — or press <kbd>Alt</kbd>+<kbd>Tab</kbd> to switch to it and back.
+          <button className="link-btn small" onClick={() => setTip(false)}>OK</button>
+        </div>
+      )}
+    </div>
   );
 }
