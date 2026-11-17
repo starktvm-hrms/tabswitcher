@@ -91,6 +91,9 @@ export async function transcribe({ apiKey, filePath, fileName = 'audio.webm', mi
     if (res.status >= 200 && res.status < 300 && res.json) return { model, ...toTranscript(res.json) };
     last = res;
     const msg = apiMessage(res);
+    if (/missing the permission/i.test(msg)) {
+      throw new ApiError('Your ElevenLabs API key isn’t allowed to use Speech to Text. In ElevenLabs → Settings → API keys, edit the key and set “Speech to Text” to Access (or create a key without restrictions), then click Transcribe again.', res.status);
+    }
     if (res.status === 401 || res.status === 403) throw new ApiError(`ElevenLabs refused the API key: ${msg}`, res.status);
     // Only a rejected model name is worth retrying with the older model.
     if (!(res.status === 400 || res.status === 422 || res.status === 404) || !/model/i.test(msg)) break;

@@ -33,6 +33,7 @@ function fakeApis() {
         const field = (n) => new RegExp(`name="${n}"\\r\\n\\r\\n([^\\r]*)`).exec(text)?.[1];
         const call = { key: req.headers['xi-api-key'], model: field('model_id'), diarize: field('diarize'), lang: field('language_code'), hasFile: text.includes('name="file"; filename=') && text.includes('FAKEAUDIO'), length: Number(req.headers['content-length']), actual: body.length };
         calls.stt.push(call);
+        if (call.key === 'el-restricted') return send(401, { detail: { status: 'missing_permissions', message: 'The API key you used is missing the permission speech_to_text to execute this operation.' } });
         if (call.key !== 'el-key-1234') return send(401, { detail: { status: 'invalid_api_key', message: 'Invalid API key' } });
         if (call.model === rejectModel) return send(422, { detail: { message: `model_id ${call.model} is not available` } });
         return send(200, { language_code: 'en', language_probability: 0.99, text: 'Good morning. Let us start.', words: WORDS });
@@ -86,6 +87,7 @@ describe('ElevenLabs speech-to-text', () => {
     rejectModel = null;
 
     await expect(transcribe({ apiKey: 'wrong', filePath: file, baseUrl: base })).rejects.toThrow(/refused the API key: Invalid API key/);
+    await expect(transcribe({ apiKey: 'el-restricted', filePath: file, baseUrl: base })).rejects.toThrow(/set “Speech to Text” to Access/);
     await expect(transcribe({ apiKey: '', filePath: file, baseUrl: base })).rejects.toThrow(/Add your ElevenLabs API key/);
   });
 });
