@@ -32,7 +32,7 @@ export class HttpError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
 
-async function call<T>(c: Creds | null, path: string, init: RequestInit = {}): Promise<T> {
+export async function call<T>(c: Creds | null, path: string, init: RequestInit = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`/api/workspaces${path}`, {

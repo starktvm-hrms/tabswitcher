@@ -59,6 +59,20 @@ One quiz holds all your questions behind **one QR code**. People scan it once. T
 
 Built for big rooms: it was load-tested with 1,000 people answering within 10 seconds from one shared network. Quiz controls are part of the workspace, so any computer with the workspace link can run the quiz. Removing a quiz from the list deletes it and its answers from the server. Quizzes are kept for 90 days.
 
+## Recording, transcripts and minutes of meeting (MOM)
+
+1. **AI settings (once):** click **⚙ AI settings** and paste your keys. They're stored on your server for this workspace only and never shown again.
+   - **ElevenLabs API key** for speech to text ([get one](https://elevenlabs.io/app/settings/api-keys)).
+   - **DeepSeek API key** for writing the minutes ([get one](https://platform.deepseek.com/api_keys)).
+2. **Record:** click **● Record**, keeping **Mic** ticked to include your voice. In Chrome or Edge choose **This tab** and keep **Also share tab audio** ticked. Everything playing in the presentation (videos, audio) is captured directly from the tab, plus your microphone. A sound meter shows the recording is picking up sound. Go fullscreen as usual: a red **REC** badge stays in the corner, and clicking it stops the recording.
+3. **Stop:** you can **download the video**, and optionally keep it in the workspace. **Save & transcribe** uploads the audio and sends it to ElevenLabs, which labels each speaker.
+4. Under **Recordings & minutes**:
+   - **Transcript:** a timestamped, editable transcript. **Rename speakers** turns "Speaker 1" into a real name; then save.
+   - **Write minutes:** DeepSeek writes the MOM: summary, topics, decisions, an **action-item table** (owner and due date), open questions and next steps. Add instructions like "Write in English. Attendees: Priya, Arun."
+   - **Export:** copy the minutes, download them as Markdown or Word, or print / save as PDF. You can also edit them.
+
+Long meetings are summarised in parts first, then combined. If a provider retires a model name, the server automatically switches to an available model.
+
 ## Development
 
 ```bash
@@ -78,6 +92,9 @@ src/
   poll/            quizzes: editor, presenter stage (cloud, bars, rating, wall), phone page (/p/CODE), QR, API client
 server/            Node.js server, no dependencies: quizzes (live updates via SSE) and workspaces (playlist + uploaded files)
 src/workspace.ts   workspace client: share links, saving, uploads with progress
+src/recorder.ts    tab + system sound + microphone recorder (video + audio-only files)
+src/meetings/      recordings list, transcript editor, minutes viewer, AI settings
+server/ai.mjs      ElevenLabs speech-to-text and DeepSeek minutes (keys stay on the server)
 deploy/            one-time VPS setup script + deploy docs
 .github/workflows/  deploy.yml (build + publish on push to main), setup-server.yml (one-time VPS setup)
 ```

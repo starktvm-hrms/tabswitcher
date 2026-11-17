@@ -9,6 +9,15 @@
 //   POST   /api/workspaces/:id/files?name=&type=  (key, raw body) → { fileId, url, size }
 //   DELETE /api/workspaces/:id/files/:fileId   (key)
 //   GET    /files/:id/:fileId                           the file (Range supported, for video seeking)
+//   GET    /api/workspaces/:id/settings        (key)   which AI keys are configured (never the keys)
+//   PUT    /api/workspaces/:id/settings        (key)   { elevenlabsKey?, deepseekKey?, deepseekModel? }
+//   GET    /api/workspaces/:id/meetings        (key)   recordings with transcript/minutes status
+//   POST   /api/workspaces/:id/meetings        (key)   { title, audioFileId, videoFileId?, durationSec, startedAt }
+//   GET    /api/workspaces/:id/meetings/:mid   (key)   one meeting with transcript and minutes
+//   PATCH  /api/workspaces/:id/meetings/:mid   (key)   { title?, transcript?, minutes? } edits
+//   POST   /api/workspaces/:id/meetings/:mid/transcribe  (key)  { language? } ElevenLabs speech-to-text
+//   POST   /api/workspaces/:id/meetings/:mid/minutes     (key)  { instructions? } DeepSeek minutes of meeting
+//   DELETE /api/workspaces/:id/meetings/:mid   (key)   meeting and its recording files
 // The key travels in the X-Workspace-Key header.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -16,6 +25,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { DEEPSEEK_URL, DEFAULT_CHAT_MODEL, ELEVENLABS_URL, minutes as writeMinutes, transcribe } from './ai.mjs';
 
 export const WS_LIMITS = {
   itemsBytes: 512 * 1024,
@@ -23,6 +33,9 @@ export const WS_LIMITS = {
   fileBytes: 500 * 1024 * 1024,
   quotaBytes: 5 * 1024 * 1024 * 1024,
   workspaces: 5000,
+  meetings: 200,
+  transcriptChars: 2_000_000,
+  minutesChars: 200_000,
 };
 
 /** Allowed upload types: file extension → canonical MIME type. */
@@ -83,7 +96,19 @@ export function parseRange(header, size) {
   return { start, end };
 }
 
-export async function createWorkspaces({ dataDir, json, readJson, log }) {
+const keyHint = (k) => (k ? `…${k.slice(-4)}` : null);
+const meetingSummary = (m) => ({
+  id: m.id, title: m.title, startedAt: m.startedAt, durationSec: m.durationSec,
+  audioUrl: m.audioUrl, videoUrl: m.videoUrl ?? null,
+  transcribe: m.transcribe ?? { state: 'none' }, minutes: m.minutesJob ?? { state: 'none' },
+  hasTranscript: !!m.transcript?.text, hasMinutes: !!m.minutes?.markdown,
+});
+
+export async function createWorkspaces({ dataDir, json, readJson, log, ai = {} }) {
+  const elevenlabsUrl = ai.elevenlabsUrl ?? ELEVENLABS_URL;
+  const deepseekUrl = ai.deepseekUrl ?? DEEPSEEK_URL;
+  // Keys can also be set for the whole server (systemd EnvironmentFile); a workspace's own key wins.
+  const envKey = (name) => ai.env?.[name] ?? process.env[name] ?? '';
   const wsDir = dataDir ? path.join(dataDir, 'workspaces') : null;
   const filesDir = dataDir ? path.join(dataDir, 'files') : null;
   /** @type {Map<string, any>} */
@@ -93,7 +118,15 @@ export async function createWorkspaces({ dataDir, json, readJson, log }) {
     await mkdir(filesDir, { recursive: true });
     for (const f of await readdir(wsDir)) {
       if (!f.endsWith('.json')) continue;
-      try { const w = JSON.parse(await readFile(path.join(wsDir, f), 'utf8')); if (isWsId(w.id)) spaces.set(w.id, w); }
+      try {
+        const w = JSON.parse(await readFile(path.join(wsDir, f), 'utf8'));
+        // Jobs that were running when the server stopped can't finish: let the user retry.
+        for (const m of w.meetings ?? []) {
+          if (m.transcribe?.state === 'running') m.transcribe = { state: 'error', error: 'Interrupted (the server restarted). Try again.' };
+          if (m.minutesJob?.state === 'running') m.minutesJob = { state: 'error', error: 'Interrupted (the server restarted). Try again.' };
+        }
+        if (isWsId(w.id)) spaces.set(w.id, w);
+      }
       catch (e) { log(`skipping unreadable workspace ${f}: ${e.message}`); }
     }
     log(`loaded ${spaces.size} workspace(s)`);
@@ -191,11 +224,14 @@ export async function createWorkspaces({ dataDir, json, readJson, log }) {
       return true;
     }
 
-    const m = /^\/api\/workspaces\/([^/]+)(?:\/(version|files)(?:\/([^/]+))?)?$/.exec(url.pathname);
+    const m = /^\/api\/workspaces\/([^/]+)(?:\/(version|files|meetings|settings)(?:\/([^/]+))?(?:\/(transcribe|minutes))?)?$/.exec(url.pathname);
     const w = m && isWsId(m[1]) ? spaces.get(m[1]) : undefined;
     if (!w) { json(res, 404, { error: 'Workspace not found. Check the link.' }); return true; }
     if (!authed(req, w)) { json(res, 403, { error: 'Wrong or missing workspace key. Open the workspace with its full link.' }); return true; }
-    const [, , sub, fileId] = m;
+    const [, , sub, fileId, action] = m;
+
+    if (sub === 'settings') { await settings(req, res, w); return true; }
+    if (sub === 'meetings') { await meetings(req, res, w, fileId, action); return true; }
 
     if (!sub && req.method === 'GET') { json(res, 200, view(w)); return true; }
     if (sub === 'version' && req.method === 'GET') { json(res, 200, { version: w.version }); return true; }
@@ -207,7 +243,11 @@ export async function createWorkspaces({ dataDir, json, readJson, log }) {
       w.version++;
       // Files no item has referenced for a day are deleted to free space. The grace
       // period covers uploads in flight and another computer saving an older list.
-      const used = new Set(items.map((i) => i.fileId).filter(Boolean));
+      // Recordings belong to meetings, not to the list: never clean those up here.
+      const used = new Set([
+        ...items.map((i) => i.fileId),
+        ...(w.meetings ?? []).flatMap((mt) => [mt.audioFileId, mt.videoFileId]),
+      ].filter(Boolean));
       for (const x of w.files ?? []) if (used.has(x.id)) x.at = Date.now();
       const orphans = (w.files ?? []).filter((x) => !used.has(x.id) && Date.now() - x.at > 24 * 3600_000);
       for (const o of orphans) await unlink(path.join(filesDir, w.id, o.id)).catch(() => {});
@@ -226,6 +266,139 @@ export async function createWorkspaces({ dataDir, json, readJson, log }) {
     }
     json(res, 405, { error: 'Method not allowed' });
     return true;
+  }
+
+  // ---- AI settings ---------------------------------------------------------------
+  const keys = (w) => ({
+    elevenlabs: w.ai?.elevenlabsKey || envKey('ELEVENLABS_API_KEY'),
+    deepseek: w.ai?.deepseekKey || envKey('DEEPSEEK_API_KEY'),
+    deepseekModel: w.ai?.deepseekModel || envKey('DEEPSEEK_MODEL') || DEFAULT_CHAT_MODEL,
+  });
+  const settingsView = (w) => {
+    const k = keys(w);
+    return {
+      elevenlabs: { configured: !!k.elevenlabs, hint: w.ai?.elevenlabsKey ? keyHint(w.ai.elevenlabsKey) : k.elevenlabs ? 'set on the server' : null },
+      deepseek: { configured: !!k.deepseek, hint: w.ai?.deepseekKey ? keyHint(w.ai.deepseekKey) : k.deepseek ? 'set on the server' : null, model: k.deepseekModel },
+    };
+  };
+
+  async function settings(req, res, w) {
+    if (req.method === 'GET') return json(res, 200, settingsView(w));
+    if (req.method !== 'PUT') return json(res, 405, { error: 'Method not allowed' });
+    const body = await readJson(req);
+    const clean = (v) => (typeof v === 'string' ? v.trim().slice(0, 200) : undefined);
+    w.ai = { ...(w.ai ?? {}) };
+    for (const [field, prop] of [['elevenlabsKey', 'elevenlabsKey'], ['deepseekKey', 'deepseekKey'], ['deepseekModel', 'deepseekModel']]) {
+      const v = clean(body[field]);
+      if (v === undefined) continue;
+      if (v) w.ai[prop] = v; else delete w.ai[prop];
+    }
+    await save(w);
+    return json(res, 200, settingsView(w));
+  }
+
+  // ---- Meetings: recordings → transcript (ElevenLabs) → minutes (DeepSeek) --------
+  const findFile = (w, id) => (w.files ?? []).find((f) => f.id === id);
+  const fmtDuration = (sec) => {
+    const s = Math.round(sec || 0), h = Math.floor(s / 3600), mnt = Math.round((s % 3600) / 60);
+    return h ? `${h} h ${mnt} min` : `${Math.max(1, mnt)} min`;
+  };
+
+  async function meetings(req, res, w, mid, action) {
+    w.meetings ??= [];
+    if (!mid) {
+      if (req.method === 'GET') return json(res, 200, { meetings: w.meetings.map(meetingSummary).reverse() });
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
+      if (w.meetings.length >= WS_LIMITS.meetings) return json(res, 400, { error: 'Too many recordings in this workspace. Delete some first.' });
+      const body = await readJson(req);
+      const audio = findFile(w, body.audioFileId);
+      if (!audio || !String(audio.type).startsWith('audio/')) return json(res, 400, { error: 'Upload the audio recording first.' });
+      const video = body.videoFileId ? findFile(w, body.videoFileId) : undefined;
+      const meeting = {
+        id: randomBytes(8).toString('base64url'),
+        title: String(body.title ?? '').trim().slice(0, 200) || `Recording ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+        startedAt: Number(body.startedAt) || Date.now(),
+        durationSec: Math.max(0, Math.round(Number(body.durationSec) || 0)),
+        audioFileId: audio.id, audioUrl: `/files/${w.id}/${audio.id}`,
+        ...(video ? { videoFileId: video.id, videoUrl: `/files/${w.id}/${video.id}` } : {}),
+        transcribe: { state: 'none' }, minutesJob: { state: 'none' },
+      };
+      w.meetings.push(meeting);
+      await save(w);
+      return json(res, 201, meetingSummary(meeting));
+    }
+
+    const meeting = w.meetings.find((x) => x.id === mid);
+    if (!meeting) return json(res, 404, { error: 'Recording not found.' });
+    const full = () => ({ ...meetingSummary(meeting), transcript: meeting.transcript ?? null, minutesDoc: meeting.minutes ?? null });
+
+    if (!action && req.method === 'GET') return json(res, 200, full());
+    if (!action && req.method === 'PATCH') {
+      const body = await readJson(req, WS_LIMITS.transcriptChars * 2);
+      if (typeof body.title === 'string' && body.title.trim()) meeting.title = body.title.trim().slice(0, 200);
+      if (typeof body.transcript === 'string') meeting.transcript = { ...(meeting.transcript ?? {}), text: body.transcript.slice(0, WS_LIMITS.transcriptChars), edited: Date.now() };
+      if (typeof body.minutes === 'string') meeting.minutes = { ...(meeting.minutes ?? {}), markdown: body.minutes.slice(0, WS_LIMITS.minutesChars), edited: Date.now() };
+      await save(w);
+      return json(res, 200, full());
+    }
+    if (!action && req.method === 'DELETE') {
+      for (const fid of [meeting.audioFileId, meeting.videoFileId].filter(Boolean)) {
+        if (isFileId(fid)) await unlink(path.join(filesDir, w.id, fid)).catch(() => {});
+        w.files = (w.files ?? []).filter((x) => x.id !== fid);
+      }
+      w.meetings = w.meetings.filter((x) => x !== meeting);
+      await save(w);
+      return json(res, 200, { ok: true });
+    }
+
+    if (action === 'transcribe' && req.method === 'POST') {
+      if (meeting.transcribe?.state === 'running') return json(res, 409, { error: 'Already transcribing.' });
+      const k = keys(w);
+      if (!k.elevenlabs) return json(res, 400, { error: 'Add your ElevenLabs API key in AI settings first.' });
+      const body = await readJson(req);
+      const file = findFile(w, meeting.audioFileId);
+      if (!file) return json(res, 400, { error: 'The audio recording is missing.' });
+      meeting.transcribe = { state: 'running', startedAt: Date.now() };
+      await save(w);
+      json(res, 202, meetingSummary(meeting));
+      const language = typeof body.language === 'string' && /^[a-z]{2,3}$/i.test(body.language) ? body.language.toLowerCase() : undefined;
+      transcribe({ apiKey: k.elevenlabs, filePath: path.join(filesDir, w.id, file.id), fileName: file.name || file.id, mime: file.type, language, baseUrl: elevenlabsUrl })
+        .then((t) => {
+          meeting.transcript = { text: t.text, language: t.language, speakers: t.speakers, model: t.model, at: Date.now() };
+          meeting.transcribe = { state: 'done', at: Date.now() };
+          log(`workspace ${w.id}: transcribed ${meeting.id} (${t.text.length} chars, ${t.model})`);
+        })
+        .catch((e) => { meeting.transcribe = { state: 'error', error: e.message.slice(0, 400) }; log(`transcribe failed: ${e.message}`); })
+        .finally(() => save(w).catch(() => {}));
+      return;
+    }
+
+    if (action === 'minutes' && req.method === 'POST') {
+      if (meeting.minutesJob?.state === 'running') return json(res, 409, { error: 'Already writing the minutes.' });
+      const k = keys(w);
+      if (!k.deepseek) return json(res, 400, { error: 'Add your DeepSeek API key in AI settings first.' });
+      if (!meeting.transcript?.text?.trim()) return json(res, 400, { error: 'Transcribe the recording first.' });
+      const body = await readJson(req);
+      const instructions = typeof body.instructions === 'string' ? body.instructions.trim().slice(0, 1000) : '';
+      meeting.minutesJob = { state: 'running', startedAt: Date.now() };
+      await save(w);
+      json(res, 202, meetingSummary(meeting));
+      const meta = {
+        title: meeting.title,
+        date: new Date(meeting.startedAt).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short', timeZone: 'Asia/Kolkata' }),
+        duration: fmtDuration(meeting.durationSec),
+      };
+      writeMinutes({ apiKey: k.deepseek, model: k.deepseekModel, transcript: meeting.transcript.text, meta, instructions, baseUrl: deepseekUrl })
+        .then((r) => {
+          meeting.minutes = { markdown: r.markdown.slice(0, WS_LIMITS.minutesChars), model: r.model, instructions, at: Date.now() };
+          meeting.minutesJob = { state: 'done', at: Date.now() };
+          log(`workspace ${w.id}: minutes for ${meeting.id} (${r.model})`);
+        })
+        .catch((e) => { meeting.minutesJob = { state: 'error', error: e.message.slice(0, 400) }; log(`minutes failed: ${e.message}`); })
+        .finally(() => save(w).catch(() => {}));
+      return;
+    }
+    return json(res, 405, { error: 'Method not allowed' });
   }
 
   async function removeAll(id) {

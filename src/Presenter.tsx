@@ -6,7 +6,10 @@ import { createQuiz, hostApi, joinUrl, type QuizDef } from './poll/api';
 import { QuizEditor } from './poll/QuizEditor';
 import { PollStage } from './poll/PollStage';
 import { Qr } from './poll/Qr';
-import { parseShareLink, shareLink } from './workspace';
+import { parseShareLink, shareLink, uploadFile } from './workspace';
+import { canRecord, fmtClock, useRecorder, type Recording } from './recorder';
+import { AiSettingsPanel, MeetingsPanel } from './meetings/Meetings';
+import { createMeeting, download, getSettings, safeName, startTranscribe } from './meetings/api';
 
 /**
  * Presentation player. Browsers always leave fullscreen when you switch browser
@@ -25,6 +28,10 @@ export default function Presenter() {
   const [quizEdit, setQuizEdit] = useState<false | { itemId?: string; initial?: QuizDef }>(false);
   const [pollBusy, setPollBusy] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const recorder = useRecorder();
+  const [withMic, setWithMic] = useState(true);
+  const [meetingsKey, setMeetingsKey] = useState(0);
   const stageRef = useRef<HTMLDivElement>(null);
   const fullscreen = useFullscreen(stageRef, { lockEscape: false });
 
@@ -115,6 +122,8 @@ export default function Presenter() {
         </div>
         <div className="row gap wrap">
           <SyncBadge status={store.status} />
+          <RecordControls recorder={recorder} withMic={withMic} setWithMic={setWithMic} />
+          <button className="btn" onClick={() => setAiOpen((v) => !v)} aria-expanded={aiOpen}>⚙ AI settings</button>
           <button className="btn" onClick={() => setShareOpen((v) => !v)} aria-expanded={shareOpen}>⇆ Use on another computer</button>
           <ThemeToggle />
           <button className="btn btn-primary" disabled={!items.length || !fullscreen.supported} onClick={() => presentFrom(activeId)}>
@@ -125,6 +134,21 @@ export default function Presenter() {
 
       {store.message && <div className={`sync-msg ${store.status}`} role="status">{store.message}</div>}
       {shareOpen && <SharePanel store={store} onClose={() => setShareOpen(false)} />}
+      {aiOpen && store.creds && <AiSettingsPanel creds={store.creds} onClose={() => setAiOpen(false)} />}
+      {recorder.error && (
+        <div className="present-error rec-error" role="alert">
+          {recorder.error} <button className="link-btn small" onClick={recorder.clearError}>Dismiss</button>
+        </div>
+      )}
+      {recorder.result && store.creds && (
+        <SaveRecording
+          rec={recorder.result}
+          creds={store.creds}
+          onDone={() => { setMeetingsKey((k) => k + 1); }}
+          onClose={recorder.clearResult}
+          onNeedKeys={() => setAiOpen(true)}
+        />
+      )}
 
       <div className="present-grid">
         <div className="card">
@@ -243,8 +267,11 @@ export default function Presenter() {
           activeId={activeId}
           onSelect={setActiveId}
           fullscreen={fullscreen}
+          recorder={recorder}
         />
       </div>
+
+      {store.creds && <MeetingsPanel creds={store.creds} refreshKey={meetingsKey} onOpenSettings={() => setAiOpen(true)} />}
     </main>
   );
 }
@@ -326,13 +353,14 @@ function ThemeToggle() {
 
 /* ------------------------------------------------------------------ */
 
-function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen }: {
+function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen, recorder }: {
   stageRef: RefObject<HTMLDivElement | null>;
   items: Presentation[];
   srcOf: (p: Presentation) => string | undefined;
   activeId?: string;
   onSelect: (id: string) => void;
   fullscreen: ReturnType<typeof useFullscreen>;
+  recorder: ReturnType<typeof useRecorder>;
 }) {
   const idx = Math.max(0, items.findIndex((p) => p.id === activeId));
   const active = items[idx];
@@ -380,6 +408,13 @@ function Stage({ stageRef, items, srcOf, activeId, onSelect, fullscreen }: {
           <Frame key={p.id} p={p} src={srcOf(p)} active={p.id === active?.id} />
         ))}
       </div>
+
+      {/* Recording indicator: always visible, also in fullscreen; click to stop. */}
+      {recorder.phase === 'recording' && (
+        <button className="rec-badge" onClick={recorder.stop} title="Stop recording">
+          <i className="rec-dot" aria-hidden /> REC {fmtClock(recorder.elapsed)} <span className="rec-stop">■ Stop</span>
+        </button>
+      )}
 
       {fullscreen.active && !dockShown && (
         <>
@@ -485,4 +520,104 @@ function Frame({ p, src, active }: { p: Presentation; src?: string; active: bool
     );
   }
   return <div className={`stage-frame ${active ? 'on' : ''}`} aria-hidden={!active}>{body}</div>;
+}
+
+/* ---------------------------------------------------------------- recording */
+
+function RecordControls({ recorder, withMic, setWithMic }: { recorder: ReturnType<typeof useRecorder>; withMic: boolean; setWithMic: (v: boolean) => void }) {
+  if (!canRecord()) return null;
+  if (recorder.phase === 'recording' || recorder.phase === 'stopping') {
+    return (
+      <div className="rec-live" role="status">
+        <i className="rec-dot" aria-hidden />
+        <b>{fmtClock(recorder.elapsed)}</b>
+        <span className="rec-meter" title="Sound level being recorded"><i style={{ width: `${Math.min(100, recorder.level * 140)}%` }} /></span>
+        <span className="muted small">{[recorder.info?.hasTabAudio && 'tab sound', recorder.info?.hasMic && 'mic'].filter(Boolean).join(' + ')}</span>
+        <button className="btn btn-sm btn-danger" onClick={recorder.stop} disabled={recorder.phase === 'stopping'}>■ Stop</button>
+      </div>
+    );
+  }
+  return (
+    <div className="rec-start">
+      <button className="btn" onClick={() => recorder.start({ mic: withMic })} disabled={recorder.phase === 'starting'}
+        title="Record this tab with its sound (videos, audio) — choose “This tab” and keep “Also share tab audio” ticked">
+        <i className="rec-dot idle" aria-hidden /> Record
+      </button>
+      <label className="row small muted" title="Also record your voice from the microphone" style={{ gap: 4 }}>
+        <input type="checkbox" checked={withMic} onChange={(e) => setWithMic(e.target.checked)} /> Mic
+      </label>
+    </div>
+  );
+}
+
+/**
+ * After a recording stops: upload the audio to the workspace (for transcription),
+ * create the meeting, start transcribing if ElevenLabs is set up. The video can be
+ * downloaded, and optionally kept in the workspace too.
+ */
+function SaveRecording({ rec, creds, onDone, onClose, onNeedKeys }: {
+  rec: Recording; creds: NonNullable<ReturnType<typeof usePresentations>['creds']>;
+  onDone: () => void; onClose: () => void; onNeedKeys: () => void;
+}) {
+  const stamp = new Date(rec.startedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const [title, setTitle] = useState(`Meeting ${stamp}`);
+  const [keepVideo, setKeepVideo] = useState(false);
+  const [phase, setPhase] = useState<'ready' | 'saving' | 'saved' | 'error'>('ready');
+  const [progress, setProgress] = useState(0);
+  const [note, setNote] = useState<string>();
+  const ext = (type: string) => (type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : 'webm');
+
+  const save = async () => {
+    setPhase('saving'); setNote(undefined);
+    try {
+      const total = rec.audio.size + (keepVideo ? rec.video.size : 0);
+      let done = 0;
+      const audio = await uploadFile(creds, rec.audio, `${safeName(title)}.${ext(rec.audioType) === 'webm' ? 'weba' : ext(rec.audioType)}`, rec.audioType.split(';')[0],
+        (f) => setProgress((done + f * rec.audio.size) / total));
+      done += rec.audio.size;
+      const video = keepVideo
+        ? await uploadFile(creds, rec.video, `${safeName(title)}.${ext(rec.videoType)}`, rec.videoType.split(';')[0], (f) => setProgress((done + f * rec.video.size) / total))
+        : undefined;
+      const meeting = await createMeeting(creds, { title, audioFileId: audio.fileId, videoFileId: video?.fileId, durationSec: rec.durationSec, startedAt: rec.startedAt });
+      const settings = await getSettings(creds).catch(() => undefined);
+      if (settings?.elevenlabs.configured) {
+        await startTranscribe(creds, meeting.id);
+        setNote('Saved. Transcribing now — see “Recordings & minutes” below.');
+      } else {
+        setNote('Saved. Add your ElevenLabs key in AI settings to transcribe it.');
+        onNeedKeys();
+      }
+      setPhase('saved');
+      onDone();
+    } catch (e) {
+      setPhase('error');
+      setNote((e as Error).message);
+    }
+  };
+
+  const mb = (b: Blob) => `${(b.size / 1024 / 1024).toFixed(1)} MB`;
+  return (
+    <section className="card card-pad share-panel rec-saved" aria-label="Recording finished">
+      <div className="row gap wrap">
+        <h2>Recording finished · {fmtClock(rec.durationSec)}</h2>
+        <span className="muted small">{[rec.hasTabAudio && 'tab sound', rec.hasMic && 'microphone'].filter(Boolean).join(' + ')}</span>
+        <span className="grow" />
+        <button className="btn btn-sm" onClick={() => { if (phase === 'saved' || window.confirm('Close without saving? Download the video first if you want to keep it.')) onClose(); }}>Close</button>
+      </div>
+      <div className="row gap wrap">
+        <input value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Recording title" style={{ flex: 1, minWidth: 220 }} disabled={phase !== 'ready' && phase !== 'error'} />
+        <button className="btn" onClick={() => download(rec.video, `${safeName(title)}.${ext(rec.videoType)}`)}>⇩ Download video ({mb(rec.video)})</button>
+      </div>
+      {phase !== 'saved' && (
+        <div className="row gap wrap">
+          <label className="row gap small"><input type="checkbox" checked={keepVideo} onChange={(e) => setKeepVideo(e.target.checked)} disabled={phase === 'saving'} /> Also keep the video in the workspace ({mb(rec.video)})</label>
+          <span className="grow" />
+          <button className="btn btn-primary" onClick={save} disabled={phase === 'saving'}>
+            {phase === 'saving' ? `Saving… ${Math.round(progress * 100)}%` : 'Save & transcribe'}
+          </button>
+        </div>
+      )}
+      {note && <div className={phase === 'error' ? 'present-error' : 'sync-msg saved'} role="status">{note}</div>}
+    </section>
+  );
 }

@@ -33,7 +33,7 @@ import {
 const MAX_POLLS = 2000;
 const RETENTION_MS = 90 * 24 * 3600 * 1000;
 
-export async function createPollServer({ dataDir, log = console.log } = {}) {
+export async function createPollServer({ dataDir, log = console.log, ai } = {}) {
   /** @type {Map<string, any>} */
   const polls = new Map();
   /** @type {Map<string, Set<http.ServerResponse>>} */
@@ -143,7 +143,7 @@ export async function createPollServer({ dataDir, log = console.log } = {}) {
   const allowAnswer = rateLimiter({ max: 6000, windowMs: 60_000 });
   const allowAny = rateLimiter({ max: 20000, windowMs: 60_000 });
   const allowWsCreate = rateLimiter({ max: 20, windowMs: 3600_000 });
-  const workspaces = await createWorkspaces({ dataDir, json, readJson: readBody, log });
+  const workspaces = await createWorkspaces({ dataDir, json, readJson: readBody, log, ai });
 
   // ---- routes ------------------------------------------------------------------
   async function handle(req, res) {
