@@ -1,0 +1,412 @@
+// Workspaces: a presenter's playlist and uploaded files, stored on the server so the
+// same presentations open on any computer. Access is by workspace id + secret key
+// (only a hash of the key is stored). Uploaded files get unguessable URLs.
+//
+//   POST   /api/workspaces                              create → { id, key }
+//   GET    /api/workspaces/:id                 (key)   { id, version, items, usage }
+//   GET    /api/workspaces/:id/version         (key)   { version }      cheap change check
+//   PUT    /api/workspaces/:id                 (key)   { items }  → { version }
+//   POST   /api/workspaces/:id/files?name=&type=  (key, raw body) → { fileId, url, size }
+//   DELETE /api/workspaces/:id/files/:fileId   (key)
+//   GET    /files/:id/:fileId                           the file (Range supported, for video seeking)
+//   GET    /api/workspaces/:id/settings        (key)   which AI keys are configured (never the keys)
+//   PUT    /api/workspaces/:id/settings        (key)   { elevenlabsKey?, deepseekKey?, deepseekModel? }
+//   GET    /api/workspaces/:id/meetings        (key)   recordings with transcript/minutes status
+//   POST   /api/workspaces/:id/meetings        (key)   { title, audioFileId, videoFileId?, durationSec, startedAt }
+//   GET    /api/workspaces/:id/meetings/:mid   (key)   one meeting with transcript and minutes
+//   PATCH  /api/workspaces/:id/meetings/:mid   (key)   { title?, transcript?, minutes? } edits
+//   POST   /api/workspaces/:id/meetings/:mid/transcribe  (key)  { language? } ElevenLabs speech-to-text
+//   POST   /api/workspaces/:id/meetings/:mid/minutes     (key)  { instructions? } DeepSeek minutes of meeting
+//   DELETE /api/workspaces/:id/meetings/:mid   (key)   meeting and its recording files
+// The key travels in the X-Workspace-Key header.
+
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import { DEEPSEEK_URL, DEFAULT_CHAT_MODEL, ELEVENLABS_URL, minutes as writeMinutes, transcribe } from './ai.mjs';
+
+export const WS_LIMITS = {
+  itemsBytes: 512 * 1024,
+  items: 300,
+  fileBytes: 500 * 1024 * 1024,
+  quotaBytes: 5 * 1024 * 1024 * 1024,
+  workspaces: 5000,
+  meetings: 200,
+  transcriptChars: 2_000_000,
+  minutesChars: 200_000,
+};
+
+/** Allowed upload types: file extension → canonical MIME type. */
+const EXT_MIME = {
+  pdf: 'application/pdf',
+  png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', avif: 'image/avif',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', ogv: 'video/ogg', m4v: 'video/x-m4v',
+  mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg',
+  flac: 'audio/flac', opus: 'audio/opus', weba: 'audio/webm',
+};
+/** MIME types browsers report → extension (canonical ones first, then common aliases). */
+const TYPES = {
+  ...Object.fromEntries(Object.entries(EXT_MIME).reverse().map(([e, m]) => [m, e])),
+  'image/jpg': 'jpg', 'audio/mp3': 'mp3', 'audio/x-wav': 'wav', 'audio/wave': 'wav', 'audio/vnd.wave': 'wav',
+  'audio/x-m4a': 'm4a', 'audio/x-aac': 'aac', 'audio/x-flac': 'flac',
+};
+const MIME_BY_EXT = EXT_MIME;
+
+export const isWsId = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{10,32}$/.test(s);
+const isFileId = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{16,40}\.[a-z0-9]{2,5}$/.test(s);
+const hash = (k) => createHash('sha256').update(k).digest();
+
+/** Guesses a file's MIME type from what the browser said or its name; null if unsupported. */
+export function fileType(mime, name) {
+  if (mime && TYPES[mime]) return EXT_MIME[TYPES[mime]];
+  const ext = String(name ?? '').toLowerCase().split('.').pop();
+  const alias = { jpeg: 'jpg' }[ext] ?? ext;
+  return EXT_MIME[alias] ?? null;
+}
+
+/** Keeps only the fields the app uses, so the stored JSON can't grow arbitrary data. */
+export function sanitizeItems(items) {
+  if (!Array.isArray(items)) return null;
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+  return items.slice(0, WS_LIMITS.items).map((it) => {
+    if (!it || typeof it !== 'object' || !str(it.id, 64)) return null;
+    const out = {
+      id: str(it.id, 64), name: str(it.name, 300) ?? '', kind: str(it.kind, 16) ?? 'embed',
+      src: str(it.src, 4000) ?? '', source: str(it.source, 100) ?? '',
+    };
+    if (it.original) out.original = str(it.original, 4000);
+    if (it.fileId) out.fileId = str(it.fileId, 64);
+    if (it.size) out.size = Number(it.size) || 0;
+    if (it.stopOnLeave === true) out.stopOnLeave = true;
+    if (['window', 'browser', 'monitor'].includes(it.surface)) out.surface = it.surface;
+    if (it.poll && typeof it.poll === 'object') out.poll = { code: str(it.poll.code, 8) ?? '', hostKey: str(it.poll.hostKey, 64) ?? '' };
+    return out;
+  }).filter(Boolean);
+}
+
+/** Parses a Range header for a file of `size` bytes. */
+export function parseRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header ?? '');
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  let start, end;
+  if (m[1] === '') { start = Math.max(0, size - Number(m[2])); end = size - 1; }
+  else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1); }
+  if (start > end || start >= size) return 'unsatisfiable';
+  return { start, end };
+}
+
+const keyHint = (k) => (k ? `…${k.slice(-4)}` : null);
+const meetingSummary = (m) => ({
+  id: m.id, title: m.title, startedAt: m.startedAt, durationSec: m.durationSec,
+  audioUrl: m.audioUrl, videoUrl: m.videoUrl ?? null,
+  transcribe: m.transcribe ?? { state: 'none' }, minutes: m.minutesJob ?? { state: 'none' },
+  hasTranscript: !!m.transcript?.text, hasMinutes: !!m.minutes?.markdown,
+});
+
+export async function createWorkspaces({ dataDir, json, readJson, log, ai = {} }) {
+  const elevenlabsUrl = ai.elevenlabsUrl ?? ELEVENLABS_URL;
+  const deepseekUrl = ai.deepseekUrl ?? DEEPSEEK_URL;
+  // Keys can also be set for the whole server (systemd EnvironmentFile); a workspace's own key wins.
+  const envKey = (name) => ai.env?.[name] ?? process.env[name] ?? '';
+  const wsDir = dataDir ? path.join(dataDir, 'workspaces') : null;
+  const filesDir = dataDir ? path.join(dataDir, 'files') : null;
+  /** @type {Map<string, any>} */
+  const spaces = new Map();
+  if (wsDir) {
+    await mkdir(wsDir, { recursive: true });
+    await mkdir(filesDir, { recursive: true });
+    for (const f of await readdir(wsDir)) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const w = JSON.parse(await readFile(path.join(wsDir, f), 'utf8'));
+        // Jobs that were running when the server stopped can't finish: let the user retry.
+        for (const m of w.meetings ?? []) {
+          if (m.transcribe?.state === 'running') m.transcribe = { state: 'error', error: 'Interrupted (the server restarted). Try again.' };
+          if (m.minutesJob?.state === 'running') m.minutesJob = { state: 'error', error: 'Interrupted (the server restarted). Try again.' };
+        }
+        if (isWsId(w.id)) spaces.set(w.id, w);
+      }
+      catch (e) { log(`skipping unreadable workspace ${f}: ${e.message}`); }
+    }
+    log(`loaded ${spaces.size} workspace(s)`);
+  }
+
+  const save = async (w) => {
+    w.updatedAt = Date.now();
+    if (!wsDir) return;
+    const file = path.join(wsDir, `${w.id}.json`);
+    await writeFile(`${file}.tmp`, JSON.stringify(w));
+    await rename(`${file}.tmp`, file);
+  };
+  const authed = (req, w) => {
+    const k = req.headers['x-workspace-key'];
+    if (typeof k !== 'string' || !k) return false;
+    const a = hash(k), b = Buffer.from(w.keyHash, 'base64');
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  const usage = (w) => (w.files ?? []).reduce((n, f) => n + f.size, 0);
+  const view = (w) => ({ id: w.id, version: w.version, items: w.items, usage: { bytes: usage(w), quota: WS_LIMITS.quotaBytes, files: (w.files ?? []).length } });
+
+  async function serveFile(req, res, wsId, fileId) {
+    if (!isWsId(wsId) || !isFileId(fileId) || !filesDir) return json(res, 404, { error: 'Not found' });
+    const file = path.join(filesDir, wsId, fileId);
+    let st;
+    try { st = await stat(file); } catch { return json(res, 404, { error: 'Not found' }); }
+    const type = MIME_BY_EXT[fileId.split('.').pop()] ?? 'application/octet-stream';
+    const headers = {
+      'Content-Type': type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+      // SVGs could carry scripts: never let them run as a page on our origin.
+      ...(type === 'image/svg+xml' ? { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox" } : {}),
+    };
+    const range = parseRange(req.headers.range, st.size);
+    if (range === 'unsatisfiable') { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }); return res.end(); }
+    if (range) {
+      res.writeHead(206, { ...headers, 'Content-Range': `bytes ${range.start}-${range.end}/${st.size}`, 'Content-Length': range.end - range.start + 1 });
+      if (req.method === 'HEAD') return res.end();
+      return pipeline(createReadStream(file, range), res).catch(() => {});
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': st.size });
+    if (req.method === 'HEAD') return res.end();
+    return pipeline(createReadStream(file), res).catch(() => {});
+  }
+
+  async function upload(req, res, w, url) {
+    const type = fileType(String(req.headers['content-type'] ?? '').split(';')[0], url.searchParams.get('name'));
+    if (!type) return json(res, 415, { error: 'Only PDF, image, video and audio files can be uploaded.' });
+    const declared = Number(req.headers['content-length'] ?? 0);
+    if (declared > WS_LIMITS.fileBytes) return json(res, 413, { error: `Files can be up to ${WS_LIMITS.fileBytes / 1024 / 1024} MB.` });
+    if (usage(w) + declared > WS_LIMITS.quotaBytes) return json(res, 413, { error: 'This workspace is full. Remove some files first.' });
+    const fileId = `${randomBytes(18).toString('base64url')}.${TYPES[type]}`;
+    const dir = path.join(filesDir, w.id);
+    await mkdir(dir, { recursive: true });
+    const tmp = path.join(dir, `.${fileId}.part`);
+    let size = 0;
+    const counter = new (await import('node:stream')).Transform({
+      transform(chunk, _enc, cb) {
+        size += chunk.length;
+        if (size > WS_LIMITS.fileBytes) return cb(Object.assign(new Error('too large'), { status: 413 }));
+        cb(null, chunk);
+      },
+    });
+    try {
+      await pipeline(req, counter, createWriteStream(tmp));
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      if (e.status === 413) return json(res, 413, { error: `Files can be up to ${WS_LIMITS.fileBytes / 1024 / 1024} MB.` });
+      throw e;
+    }
+    if (!size) { await unlink(tmp).catch(() => {}); return json(res, 400, { error: 'The file is empty.' }); }
+    await rename(tmp, path.join(dir, fileId));
+    w.files = [...(w.files ?? []), { id: fileId, size, type, name: String(url.searchParams.get('name') ?? '').slice(0, 200), at: Date.now() }];
+    await save(w);
+    return json(res, 201, { fileId, url: `/files/${w.id}/${fileId}`, size, type });
+  }
+
+  /** Returns true if it handled the request. */
+  async function handle(req, res, url, { allowCreate, ip }) {
+    const f = /^\/files\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+    if (f && (req.method === 'GET' || req.method === 'HEAD')) { await serveFile(req, res, f[1], f[2]); return true; }
+    if (!url.pathname.startsWith('/api/workspaces')) return false;
+
+    if (url.pathname === '/api/workspaces' && req.method === 'POST') {
+      if (!allowCreate(ip)) { json(res, 429, { error: 'Too many workspaces created. Try again later.' }); return true; }
+      if (spaces.size >= WS_LIMITS.workspaces) { json(res, 503, { error: 'Workspace storage is full.' }); return true; }
+      let id;
+      do id = randomBytes(9).toString('base64url'); while (spaces.has(id));
+      const key = randomBytes(24).toString('base64url');
+      const w = { id, keyHash: hash(key).toString('base64'), version: 1, items: [], files: [], createdAt: Date.now() };
+      spaces.set(id, w);
+      await save(w);
+      log(`workspace ${id} created`);
+      json(res, 201, { id, key, version: 1 });
+      return true;
+    }
+
+    const m = /^\/api\/workspaces\/([^/]+)(?:\/(version|files|meetings|settings)(?:\/([^/]+))?(?:\/(transcribe|minutes))?)?$/.exec(url.pathname);
+    const w = m && isWsId(m[1]) ? spaces.get(m[1]) : undefined;
+    if (!w) { json(res, 404, { error: 'Workspace not found. Check the link.' }); return true; }
+    if (!authed(req, w)) { json(res, 403, { error: 'Wrong or missing workspace key. Open the workspace with its full link.' }); return true; }
+    const [, , sub, fileId, action] = m;
+
+    if (sub === 'settings') { await settings(req, res, w); return true; }
+    if (sub === 'meetings') { await meetings(req, res, w, fileId, action); return true; }
+
+    if (!sub && req.method === 'GET') { json(res, 200, view(w)); return true; }
+    if (sub === 'version' && req.method === 'GET') { json(res, 200, { version: w.version }); return true; }
+    if (!sub && req.method === 'PUT') {
+      const body = await readJson(req, WS_LIMITS.itemsBytes);
+      const items = sanitizeItems(body.items);
+      if (!items) { json(res, 400, { error: 'Invalid items.' }); return true; }
+      w.items = items;
+      w.version++;
+      // Files no item has referenced for a day are deleted to free space. The grace
+      // period covers uploads in flight and another computer saving an older list.
+      // Recordings belong to meetings, not to the list: never clean those up here.
+      const used = new Set([
+        ...items.map((i) => i.fileId),
+        ...(w.meetings ?? []).flatMap((mt) => [mt.audioFileId, mt.videoFileId]),
+      ].filter(Boolean));
+      for (const x of w.files ?? []) if (used.has(x.id)) x.at = Date.now();
+      const orphans = (w.files ?? []).filter((x) => !used.has(x.id) && Date.now() - x.at > 24 * 3600_000);
+      for (const o of orphans) await unlink(path.join(filesDir, w.id, o.id)).catch(() => {});
+      w.files = (w.files ?? []).filter((x) => !orphans.includes(x));
+      await save(w);
+      json(res, 200, { version: w.version, usage: view(w).usage });
+      return true;
+    }
+    if (sub === 'files' && !fileId && req.method === 'POST') { await upload(req, res, w, url); return true; }
+    if (sub === 'files' && fileId && req.method === 'DELETE') {
+      if (isFileId(fileId)) await unlink(path.join(filesDir, w.id, fileId)).catch(() => {});
+      w.files = (w.files ?? []).filter((x) => x.id !== fileId);
+      await save(w);
+      json(res, 200, { ok: true });
+      return true;
+    }
+    json(res, 405, { error: 'Method not allowed' });
+    return true;
+  }
+
+  // ---- AI settings ---------------------------------------------------------------
+  const keys = (w) => ({
+    elevenlabs: w.ai?.elevenlabsKey || envKey('ELEVENLABS_API_KEY'),
+    deepseek: w.ai?.deepseekKey || envKey('DEEPSEEK_API_KEY'),
+    deepseekModel: w.ai?.deepseekModel || envKey('DEEPSEEK_MODEL') || DEFAULT_CHAT_MODEL,
+  });
+  const settingsView = (w) => {
+    const k = keys(w);
+    return {
+      elevenlabs: { configured: !!k.elevenlabs, hint: w.ai?.elevenlabsKey ? keyHint(w.ai.elevenlabsKey) : k.elevenlabs ? 'set on the server' : null },
+      deepseek: { configured: !!k.deepseek, hint: w.ai?.deepseekKey ? keyHint(w.ai.deepseekKey) : k.deepseek ? 'set on the server' : null, model: k.deepseekModel },
+    };
+  };
+
+  async function settings(req, res, w) {
+    if (req.method === 'GET') return json(res, 200, settingsView(w));
+    if (req.method !== 'PUT') return json(res, 405, { error: 'Method not allowed' });
+    const body = await readJson(req);
+    const clean = (v) => (typeof v === 'string' ? v.trim().slice(0, 200) : undefined);
+    w.ai = { ...(w.ai ?? {}) };
+    for (const [field, prop] of [['elevenlabsKey', 'elevenlabsKey'], ['deepseekKey', 'deepseekKey'], ['deepseekModel', 'deepseekModel']]) {
+      const v = clean(body[field]);
+      if (v === undefined) continue;
+      if (v) w.ai[prop] = v; else delete w.ai[prop];
+    }
+    await save(w);
+    return json(res, 200, settingsView(w));
+  }
+
+  // ---- Meetings: recordings → transcript (ElevenLabs) → minutes (DeepSeek) --------
+  const findFile = (w, id) => (w.files ?? []).find((f) => f.id === id);
+  const fmtDuration = (sec) => {
+    const s = Math.round(sec || 0), h = Math.floor(s / 3600), mnt = Math.round((s % 3600) / 60);
+    return h ? `${h} h ${mnt} min` : `${Math.max(1, mnt)} min`;
+  };
+
+  async function meetings(req, res, w, mid, action) {
+    w.meetings ??= [];
+    if (!mid) {
+      if (req.method === 'GET') return json(res, 200, { meetings: w.meetings.map(meetingSummary).reverse() });
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
+      if (w.meetings.length >= WS_LIMITS.meetings) return json(res, 400, { error: 'Too many recordings in this workspace. Delete some first.' });
+      const body = await readJson(req);
+      const audio = findFile(w, body.audioFileId);
+      if (!audio || !String(audio.type).startsWith('audio/')) return json(res, 400, { error: 'Upload the audio recording first.' });
+      const video = body.videoFileId ? findFile(w, body.videoFileId) : undefined;
+      const meeting = {
+        id: randomBytes(8).toString('base64url'),
+        title: String(body.title ?? '').trim().slice(0, 200) || `Recording ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+        startedAt: Number(body.startedAt) || Date.now(),
+        durationSec: Math.max(0, Math.round(Number(body.durationSec) || 0)),
+        audioFileId: audio.id, audioUrl: `/files/${w.id}/${audio.id}`,
+        ...(video ? { videoFileId: video.id, videoUrl: `/files/${w.id}/${video.id}` } : {}),
+        transcribe: { state: 'none' }, minutesJob: { state: 'none' },
+      };
+      w.meetings.push(meeting);
+      await save(w);
+      return json(res, 201, meetingSummary(meeting));
+    }
+
+    const meeting = w.meetings.find((x) => x.id === mid);
+    if (!meeting) return json(res, 404, { error: 'Recording not found.' });
+    const full = () => ({ ...meetingSummary(meeting), transcript: meeting.transcript ?? null, minutesDoc: meeting.minutes ?? null });
+
+    if (!action && req.method === 'GET') return json(res, 200, full());
+    if (!action && req.method === 'PATCH') {
+      const body = await readJson(req, WS_LIMITS.transcriptChars * 2);
+      if (typeof body.title === 'string' && body.title.trim()) meeting.title = body.title.trim().slice(0, 200);
+      if (typeof body.transcript === 'string') meeting.transcript = { ...(meeting.transcript ?? {}), text: body.transcript.slice(0, WS_LIMITS.transcriptChars), edited: Date.now() };
+      if (typeof body.minutes === 'string') meeting.minutes = { ...(meeting.minutes ?? {}), markdown: body.minutes.slice(0, WS_LIMITS.minutesChars), edited: Date.now() };
+      await save(w);
+      return json(res, 200, full());
+    }
+    if (!action && req.method === 'DELETE') {
+      for (const fid of [meeting.audioFileId, meeting.videoFileId].filter(Boolean)) {
+        if (isFileId(fid)) await unlink(path.join(filesDir, w.id, fid)).catch(() => {});
+        w.files = (w.files ?? []).filter((x) => x.id !== fid);
+      }
+      w.meetings = w.meetings.filter((x) => x !== meeting);
+      await save(w);
+      return json(res, 200, { ok: true });
+    }
+
+    if (action === 'transcribe' && req.method === 'POST') {
+      if (meeting.transcribe?.state === 'running') return json(res, 409, { error: 'Already transcribing.' });
+      const k = keys(w);
+      if (!k.elevenlabs) return json(res, 400, { error: 'Add your ElevenLabs API key in AI settings first.' });
+      const body = await readJson(req);
+      const file = findFile(w, meeting.audioFileId);
+      if (!file) return json(res, 400, { error: 'The audio recording is missing.' });
+      meeting.transcribe = { state: 'running', startedAt: Date.now() };
+      await save(w);
+      json(res, 202, meetingSummary(meeting));
+      const language = typeof body.language === 'string' && /^[a-z]{2,3}$/i.test(body.language) ? body.language.toLowerCase() : undefined;
+      transcribe({ apiKey: k.elevenlabs, filePath: path.join(filesDir, w.id, file.id), fileName: file.name || file.id, mime: file.type, language, baseUrl: elevenlabsUrl })
+        .then((t) => {
+          meeting.transcript = { text: t.text, language: t.language, speakers: t.speakers, model: t.model, at: Date.now() };
+          meeting.transcribe = { state: 'done', at: Date.now() };
+          log(`workspace ${w.id}: transcribed ${meeting.id} (${t.text.length} chars, ${t.model})`);
+        })
+        .catch((e) => { meeting.transcribe = { state: 'error', error: e.message.slice(0, 400) }; log(`transcribe failed: ${e.message}`); })
+        .finally(() => save(w).catch(() => {}));
+      return;
+    }
+
+    if (action === 'minutes' && req.method === 'POST') {
+      if (meeting.minutesJob?.state === 'running') return json(res, 409, { error: 'Already writing the minutes.' });
+      const k = keys(w);
+      if (!k.deepseek) return json(res, 400, { error: 'Add your DeepSeek API key in AI settings first.' });
+      if (!meeting.transcript?.text?.trim()) return json(res, 400, { error: 'Transcribe the recording first.' });
+      const body = await readJson(req);
+      const instructions = typeof body.instructions === 'string' ? body.instructions.trim().slice(0, 1000) : '';
+      meeting.minutesJob = { state: 'running', startedAt: Date.now() };
+      await save(w);
+      json(res, 202, meetingSummary(meeting));
+      const meta = {
+        title: meeting.title,
+        date: new Date(meeting.startedAt).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short', timeZone: 'Asia/Kolkata' }),
+        duration: fmtDuration(meeting.durationSec),
+      };
+      writeMinutes({ apiKey: k.deepseek, model: k.deepseekModel, transcript: meeting.transcript.text, meta, instructions, baseUrl: deepseekUrl })
+        .then((r) => {
+          meeting.minutes = { markdown: r.markdown.slice(0, WS_LIMITS.minutesChars), model: r.model, instructions, at: Date.now() };
+          meeting.minutesJob = { state: 'done', at: Date.now() };
+          log(`workspace ${w.id}: minutes for ${meeting.id} (${r.model})`);
+        })
+        .catch((e) => { meeting.minutesJob = { state: 'error', error: e.message.slice(0, 400) }; log(`minutes failed: ${e.message}`); })
+        .finally(() => save(w).catch(() => {}));
+      return;
+    }
+    return json(res, 405, { error: 'Method not allowed' });
+  }
+
+  async function removeAll(id) {
+    spaces.delete(id);
+    if (wsDir) await rm(path.join(wsDir, `${id}.json`), { force: true });
+    if (filesDir) await rm(path.join(filesDir, id), { recursive: true, force: true });
+  }
+
+  return { handle, spaces, removeAll };
+}
